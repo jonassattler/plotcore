@@ -93,8 +93,10 @@ TEST_CASE("a one-sample spike in a million survives the thinning", "[plot]")
     const plotcore::PlotView view = paneOver(0.0, 1000000.0, -1.0, 11.0);
     const Projected drawn = project(lineOver(values), plotcore::PlotAxis{}, view);
 
-    REQUIRE(drawn.runs.size() == 1);
-    // One run, two points a column, and the pane is a thousand columns wide.
+    // The column that holds the spike is a vertical, and the stroke ends
+    // there, so the flat chords on either side are runs of their own.
+    REQUIRE(drawn.runs.size() >= 2);
+    // Two points a column, and the pane is a thousand columns wide.
     CHECK(drawn.points.size() <= 2000);
 
     // Where 10.0 lands: a twelfth of the way down from the top of a 500-pixel
@@ -222,7 +224,10 @@ TEST_CASE("a line that says where its points are is drawn where it says", "[plot
     REQUIRE(drawn.points.size() == xs.size());
     for (std::size_t i = 0; i < xs.size(); i += 97) {
         INFO("point " << i);
-        CHECK(drawn.points[i].x() == Approx(plotcore::xFractionOf(xs[i], view) * view.width));
+        // The centre of the device pixel that x falls in. A pan does not walk
+        // it across the pixel.
+        const double px = plotcore::xFractionOf(xs[i], view) * view.width;
+        CHECK(drawn.points[i].x() == Approx(std::floor(px) + 0.5));
     }
     CHECK(plotcore::xOf(line, plotcore::PlotAxis{}, 1234) == xs[1234]);
 
@@ -693,7 +698,10 @@ TEST_CASE("an epoch timestamp draws as a line and not as a staircase", "[plot]")
             ++distinct;
         }
     }
-    CHECK(distinct == static_cast<int>(drawn.points.size()));
+    // A vertical's two stations share a pixel, and two edges can fall in one,
+    // so the count is the pane's and not one distinct x per station. What it
+    // must not be is the staircase: a handful of treads a hundred seconds wide.
+    CHECK(distinct > 400);
 
     // And the same values cast before the projection: what the staircase would
     // have been, so the test says what it is defending against.
@@ -775,9 +783,10 @@ TEST_CASE("a transposed pane draws x up it and y across it", "[plot][flip]")
     REQUIRE(drawn.points.size() == values.size());
     for (std::size_t i = 0; i < drawn.points.size(); ++i) {
         CHECK(drawn.points[i].x() == Approx(250.0));
-        // Sample i is at x = i of 0..10, a tenth of the way up per sample,
-        // from the bottom of a pane 500 high.
-        CHECK(drawn.points[i].y() == Approx(500.0 - static_cast<double>(i) * 50.0));
+        // Sample i is at x = i of 0..10. Upright, that is i * 50 across a pane
+        // 500 wide, and the stroke sits on the centre of that device pixel.
+        const double across = std::floor(static_cast<double>(i) * 50.0) + 0.5;
+        CHECK(drawn.points[i].y() == Approx(500.0 - across));
     }
 
     // And the pointer is taken back the same way, which is what the
@@ -874,9 +883,10 @@ TEST_CASE("a line against a time base is drawn sample for sample", "[plot]")
     CHECK(drawn.points.size() == 5);
     // In the order the samples occur and not in x order, which is what "drawn
     // sample for sample" means.
-    CHECK(drawn.points[0].x() == Approx(0.0));
-    CHECK(drawn.points[1].x() == Approx(1000.0));
-    CHECK(drawn.points[2].x() == Approx(200.0));
+    // The centre of the device pixel each time falls in.
+    CHECK(drawn.points[0].x() == Approx(0.5));
+    CHECK(drawn.points[1].x() == Approx(1000.5));
+    CHECK(drawn.points[2].x() == Approx(200.5));
 }
 
 TEST_CASE("the data-space seam agrees with the projection about what is drawn", "[plot]")
@@ -1291,8 +1301,8 @@ TEST_CASE("a stretched line covers the axis whatever its length", "[plot]")
 
     const Projected drawn = project(line, plotcore::PlotAxis{}, paneOver(0.0, 99.0, 0.0, 4.0));
     REQUIRE(drawn.runs.size() == 1);
-    CHECK(drawn.points.front().x() == Approx(0.0).margin(0.01));
-    CHECK(drawn.points.back().x() == Approx(1000.0).margin(0.01));
+    CHECK(drawn.points.front().x() == Approx(0.5).margin(0.01));
+    CHECK(drawn.points.back().x() == Approx(1000.5).margin(0.01));
 }
 
 TEST_CASE("a line can start somewhere other than the beginning of the axis", "[plot]")
@@ -1499,7 +1509,9 @@ TEST_CASE("the projection says whether a point is a sample or a summary", "[plot
     const plotcore::PlotProjected whole = plotcore::projectLine(
         lineOver(values), plotcore::PlotAxis{}, paneOver(0.0, 100000.0, -1.0, 1.0), points, runs);
     CHECK(whole.decimated);
-    CHECK(whole.runs == 1);
+    // Each column that stands a pixel tall is its own vertical, so the stroke
+    // is one run a column rather than one run for the line.
+    CHECK(whole.runs > 1);
 
     points.clear();
     runs.clear();
@@ -1607,15 +1619,18 @@ TEST_CASE("panning moves the line without reshuffling it", "[plot]")
         return xMin + at / view.width * (xMax - xMin);
     };
 
-    // The same window, slid along by a third of a bucket and then by a whole
-    // one. The spike must stay where it is in the data.
+    // The same window, slid by less than a column and then by a whole one.
+    // The grid is anchored at zero, so the spike stays in its column. The
+    // drawn x is that column's middle, on the centre of a device pixel, which
+    // is why the recovered position is the column and not the sample.
     const double here = peakAt(0.0, 200000.0);
     const double nudged = peakAt(60.0, 200060.0);
     const double further = peakAt(200.0, 200200.0);
+    const double column = 200000.0 / 1000.0;
 
-    CHECK(here == Approx(120000.0).margin(256.0));
-    CHECK(nudged == Approx(here).margin(1.0));
-    CHECK(further == Approx(here).margin(1.0));
+    CHECK(here == Approx(120000.0).margin(column));
+    CHECK(nudged == Approx(here).margin(column));
+    CHECK(further == Approx(here).margin(column));
 }
 
 TEST_CASE("a bucket holds the same samples wherever the window is", "[plot]")
@@ -1661,11 +1676,12 @@ TEST_CASE("a bucket holds the same samples wherever the window is", "[plot]")
     CHECK(matched >= wide.size() - 4);
 }
 
-TEST_CASE("a bucket is a power of two, so zooming steps by octaves", "[plot]")
+TEST_CASE("a crowded window draws the pane's columns, whatever its width", "[plot]")
 {
-    // Which is the other half of the bargain: the detail changes once per
-    // doubling rather than continuously, and between those steps the picture
-    // is completely still.
+    // The columns are the device pixels, anchored to the data. Two windows
+    // that both put many samples in a column therefore draw the same amount,
+    // the pane, and not a share of how much data is on screen. The picture
+    // changes when a column drops to one sample: those are the samples.
     std::vector<double> values(65536);
     for (std::size_t i = 0; i < values.size(); ++i) {
         values[i] = std::sin(static_cast<double>(i) / 30.0);
@@ -1678,22 +1694,16 @@ TEST_CASE("a bucket is a power of two, so zooming steps by octaves", "[plot]")
         return drawn.points.size();
     };
 
-    // Inside one octave the bucket size does not change, so the number of
-    // points drawn is simply proportional to how much data is on screen.
     const std::size_t wide = pointsAcross(60000.0);
     const std::size_t narrower = pointsAcross(50000.0);
-    CHECK(wide > 0);
-    CHECK(static_cast<double>(narrower) ==
-          Approx(static_cast<double>(wide) * 50000.0 / 60000.0).margin(4.0));
+    CHECK(wide > 1000);
+    CHECK(static_cast<double>(narrower) == Approx(static_cast<double>(wide)).margin(8.0));
 
-    // And crossing into the next octave halves the bucket, which is where the
-    // extra detail comes from: a slightly *smaller* window draws nearly twice
-    // as many points, and every one of them covers half as much data.
-    //
-    // A thousand columns puts that boundary at thirty-two samples a column.
-    const std::size_t justAbove = pointsAcross(33000.0);
-    const std::size_t justBelow = pointsAcross(31000.0);
-    CHECK(static_cast<double>(justBelow) > 1.5 * static_cast<double>(justAbove));
+    // Twenty samples across a thousand columns: the samples, not a vertical
+    // per column.
+    const std::size_t close = pointsAcross(20.0);
+    CHECK(close > 15);
+    CHECK(close < 40);
 }
 
 // ---------------------------------------------------------------------------
@@ -2005,11 +2015,12 @@ plotcore::Point topmost(const Projected& drawn)
 
 } // namespace
 
-TEST_CASE("a spike on a bucket's last sample is drawn at that sample", "[plot][positions]")
+TEST_CASE("a spike is the vertical in the middle of its column", "[plot][positions]")
 {
-    // A hundred thousand samples across a thousand columns is a renderer
-    // bucket of 128, and 38527 is the last sample of bucket 300. Drawn at the
-    // bucket's middle it would stand at 38464, sixty-three samples early.
+    // A hundred thousand samples across a thousand columns. The spike is one
+    // sample of its column, and the column is drawn from its minimum to its
+    // maximum at the column's middle -- then the stroke ends, so the vertical
+    // does not run into the next column.
     const std::size_t spike = 128 * 300 + 127;
     const std::vector<double> values = spikeAt(100000, spike);
     const plotcore::PlotView view = paneOver(0.0, 99999.0, -1.0, 11.0);
@@ -2017,45 +2028,57 @@ TEST_CASE("a spike on a bucket's last sample is drawn at that sample", "[plot][p
     const Projected drawn = project(lineOver(values), plotcore::PlotAxis{}, view);
     REQUIRE_FALSE(drawn.points.empty());
     const plotcore::Point top = topmost(drawn);
-    CHECK(top.x() == Approx(plotcore::xFractionOf(static_cast<double>(spike), view) * view.width)
-                         .epsilon(1e-12));
+    const double dataX = view.xMin + top.x() / view.width * (view.xMax - view.xMin);
+    const double column = (view.xMax - view.xMin) / view.width;
+    CHECK(std::abs(dataX - static_cast<double>(spike)) <= column + 1.0);
+    const double spikeY = view.height - plotcore::yFractionOf(10.0, view) * view.height;
+    CHECK(top.y() == Approx(spikeY).margin(0.01));
+
+    bool gapped = false;
+    for (const plotcore::PlotRun& run : drawn.runs) {
+        if (run.count != 2) {
+            continue;
+        }
+        const plotcore::Point& a = drawn.points[static_cast<std::size_t>(run.first)];
+        const plotcore::Point& b = drawn.points[static_cast<std::size_t>(run.first + 1)];
+        if (a.x() == Approx(top.x()) && b.x() == Approx(top.x()) && a.y() != b.y()) {
+            gapped = true;
+        }
+    }
+    CHECK(gapped);
 }
 
-TEST_CASE("the stroke out of a column reaches the next column's first sample", "[plot][seam]")
+TEST_CASE("the chord at an edge lengthens both columns", "[plot][seam]")
 {
-    // The renderer's bucket of 128 again. Bucket 299 is flat at zero; bucket
-    // 300 enters at 5, which is neither of its extremes -- it dips to -10 and
-    // then rises to 10. Folded out of its own samples, the flat bucket handed
-    // the stroke straight to the -10, and the 5 the line climbs to across the
-    // edge was drawn nowhere. The edge sits on the 5, so it is the flat
-    // column's to draw. See the seam in Levels.hpp.
-    constexpr std::size_t kEntry = 128 * 300;
-    std::vector<double> values(100000, 0.0);
-    values[kEntry] = 5.0;
-    values[kEntry + 1] = -10.0;
-    values[kEntry + 2] = 10.0;
-    const plotcore::PlotView view = paneOver(0.0, 99999.0, -11.0, 11.0);
+    // Columns two and a half samples wide, anchored at zero, so an edge falls
+    // halfway between sample 2 and sample 3. The chord there is the value
+    // between them, and it lengthens the column on each side: the left one's
+    // maximum and the right one's minimum. A NaN on one side of the edge is
+    // not a chord, and neither column is lengthened by it.
+    const plotcore::PlotView view = paneOver(0.0, 2500.0, -1.0, 11.0);
+    const double chordY = view.height - plotcore::yFractionOf(5.0, view) * view.height;
 
-    const auto drawsTheEntry = [&](const std::vector<double>& line) {
+    const auto reaches = [&](const std::vector<double>& line) {
         const Projected drawn = project(lineOver(line), plotcore::PlotAxis{}, view);
-        const double x = plotcore::xFractionOf(static_cast<double>(kEntry), view) * view.width;
-        const double y = view.height - plotcore::yFractionOf(5.0, view) * view.height;
+        int hits = 0;
         for (const plotcore::Point& point : drawn.points) {
-            if (point.x() == Approx(x).epsilon(1e-12) && point.y() == Approx(y).epsilon(1e-12)) {
-                return true;
+            if (point.y() == Approx(chordY).margin(0.01)) {
+                ++hits;
             }
         }
-        return false;
+        return hits;
     };
-    CHECK(drawsTheEntry(values));
 
-    SECTION("and does not reach across a gap to it")
+    std::vector<double> values(2500, 0.0);
+    for (std::size_t i = 3; i < values.size(); ++i) {
+        values[i] = 10.0;
+    }
+    CHECK(reaches(values) >= 2);
+
+    SECTION("and does not cross a gap to do it")
     {
-        // The flat column's last sample missing: there is no stroke between the
-        // two, so neither column has the 5 to draw.
-        std::vector<double> holed = values;
-        holed[kEntry - 1] = kNaN;
-        CHECK_FALSE(drawsTheEntry(holed));
+        values[2] = kNaN;
+        CHECK(reaches(values) == 0);
     }
 }
 
@@ -2082,12 +2105,16 @@ TEST_CASE("a line that names its positions is still thinned for a narrower pane"
 
     const Projected drawn = project(line, plotcore::PlotAxis{}, view);
     REQUIRE_FALSE(drawn.points.empty());
-    // Four stations a column is the most the renderer draws straight.
-    CHECK(drawn.points.size() <= static_cast<std::size_t>(4.0 * view.width));
-    // ...and the spike stands at its own sample, not at its place in the summary.
+    // A vertical is two stations a column.
+    CHECK(drawn.points.size() <= static_cast<std::size_t>(2.0 * view.width + 2));
+    // The spike is the top of the column that holds it, at that column's
+    // middle, not at its place in the summary and not half a bucket early.
     const plotcore::Point top = topmost(drawn);
-    CHECK(top.x() == Approx(plotcore::xFractionOf(static_cast<double>(spike), view) * view.width)
-                         .epsilon(1e-12));
+    const double dataX = view.xMin + top.x() / view.width * (view.xMax - view.xMin);
+    const double column = (view.xMax - view.xMin) / view.width;
+    CHECK(std::abs(dataX - static_cast<double>(spike)) <= column + 1.0);
+    CHECK(top.y() == Approx(view.height - plotcore::yFractionOf(10.0, view) * view.height)
+                         .margin(0.01));
 }
 
 TEST_CASE("a line that names its positions is clipped to the window by them", "[plot][positions]")
@@ -2112,10 +2139,11 @@ TEST_CASE("a line that names its positions is clipped to the window by them", "[
         const double x = view.xMin + point.x() / view.width * (view.xMax - view.xMin);
         CHECK(x >= 49500.0 - 16.0);
         CHECK(x <= 50500.0 + 16.0);
-        CHECK(std::abs(x - std::round(x)) < 1e-6); // an element, not between two
+        // The centre of the device pixel the element fell in.
+        CHECK(point.x() == Approx(std::floor(point.x()) + 0.5));
     }
-    CHECK(topmost(drawn).x() ==
-          Approx(plotcore::xFractionOf(50007.0, view) * view.width).epsilon(1e-12));
+    const double spikePx = plotcore::xFractionOf(50007.0, view) * view.width;
+    CHECK(topmost(drawn).x() == Approx(std::floor(spikePx) + 0.5));
 }
 
 TEST_CASE("a stretched line places its positions by one factor", "[plot][positions]")

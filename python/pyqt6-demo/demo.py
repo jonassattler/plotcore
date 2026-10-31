@@ -109,7 +109,11 @@ class DemoWindow(QMainWindow):
         self.plot.changed.connect(self._after_gesture)
         self.readout = QTimer(self, interval=100, timeout=self._refresh_status)
         self.readout.start()
-        self.stream_timer = QTimer(self, interval=15, timeout=self._stream_step)
+        # Idle, not every 15 ms. A gap between pieces stretched the five million
+        # samples across the better part of a second, and a move queued behind
+        # the next piece. Zero runs a piece whenever the loop has nothing else.
+        self.stream_timer = QTimer(self, interval=0, timeout=self._stream_step)
+        self.stream_busy = False
         self.stream_line = -1
         self.stream_at = 0
         self.stream_values: Optional[np.ndarray] = None
@@ -403,22 +407,32 @@ class DemoWindow(QMainWindow):
         self.refresh_lines()
 
     def _stream_step(self) -> None:
-        if self.stream_values is None or self.stream_line < 0:
-            self.stream_timer.stop()
-            self.stream.setEnabled(True)
+        # setText can deliver the next timeout before this one has stored how
+        # far it got, and the same piece would be appended twice.
+        if self.stream_busy:
             return
-        end = min(self.stream_at + 100_000, len(self.stream_values))
-        self.figure.append_line(self.stream_line, self.stream_values[self.stream_at:end])
-        self.stream_at = end
-        self.status.setText(f"streaming: {end} of {len(self.stream_values)}")
-        if end >= len(self.stream_values):
-            self.figure.finish_line(self.stream_line)
-            self.stream_timer.stop()
-            self.stream_values = None
-            self.stream_line = -1
-            self.stream.setEnabled(True)
-            self.refresh_lines()
-            self.plot.update()
+        self.stream_busy = True
+        self.stream_timer.stop()
+        try:
+            if self.stream_values is None or self.stream_line < 0:
+                self.stream.setEnabled(True)
+                return
+            end = min(self.stream_at + 100_000, len(self.stream_values))
+            self.figure.append_line(self.stream_line, self.stream_values[self.stream_at:end])
+            self.stream_at = end
+            done = end >= len(self.stream_values)
+            self.status.setText(f"streaming: {end} of {len(self.stream_values)}")
+            if done:
+                self.figure.finish_line(self.stream_line)
+                self.stream_values = None
+                self.stream_line = -1
+                self.stream.setEnabled(True)
+                self.refresh_lines()
+                self.plot.update()
+        finally:
+            self.stream_busy = False
+            if self.stream_values is not None:
+                self.stream_timer.start()
 
     def apply_x_axis(self) -> None:
         longest = max([line.length for line in self.figure.lines()] + [1])
@@ -611,9 +625,32 @@ class DemoWindow(QMainWindow):
         self.plot.update()
 
     def _after_gesture(self) -> None:
-        self.refresh_lines()
+        # Rebuilding the row -- a combo and two buttons per line -- on every
+        # move of a drag is what made the window queue layouts instead of
+        # following the pointer. A gesture changes the scale, the shift and the
+        # window, and those are written into the cells already there.
+        self._refresh_line_numbers()
         self._refresh_view_boxes()
         self._refresh_status()
+
+    def _refresh_line_numbers(self) -> None:
+        if self.lines.rowCount() != len(self.figure):
+            self.refresh_lines()
+            return
+        self.refreshing = True
+        try:
+            for i, line in enumerate(self.figure.lines()):
+                settings = line.settings
+                for column, key in ((SCALE, "scale"), (SHIFT, "shift")):
+                    item = self.lines.item(i, column)
+                    if item is None:
+                        self.refresh_lines()
+                        return
+                    text = f"{settings[key]:.4g}"
+                    if item.text() != text:
+                        item.setText(text)
+        finally:
+            self.refreshing = False
 
     def _refresh_status(self) -> None:
         scene = self.plot.last_scene

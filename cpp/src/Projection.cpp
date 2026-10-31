@@ -13,24 +13,6 @@
 namespace plotcore {
 namespace {
 
-// How many samples a pixel column may hold before the envelope takes over.
-//
-// Two per column is the envelope's own output rate, so below two it would draw
-// more vertices than there are samples and there is nothing left for it to do.
-// The threshold is twice that, and the slack is deliberate: the models thin a
-// line to about two points per column already -- a bucket is a column -- and
-// they are working from the frame's width rather than from the plot area inside
-// it, because taking it from the area is a binding loop (see
-// PlotSurface.pushColumns). So what arrives here is a little denser than two a
-// column rather than a little sparser.
-//
-// Without the slack that overshoot would be expensive out of all proportion:
-// the bucket below is rounded up to a power of two, so a hair over two samples
-// a column buys a bucket of four and *halves* the horizontal resolution. Four
-// stations a column drawn straight is a few thousand vertices more and the
-// picture the data actually has.
-constexpr double kSamplesPerColumn = 4.0;
-
 // How far outside the pane a projected point is allowed to land.
 //
 // A sample does not stop existing because the reader zoomed past it: it is
@@ -359,7 +341,27 @@ PlotProjected projectLine(const PlotLine& line, const PlotAxis& axis, const Plot
         }
         open = -1;
     };
+    // The centre of the device pixel the point falls in, back in logical
+    // pixels. A pan then moves the stroke by whole pixels: the same sample
+    // keeps the same place inside its pixel, which is what stops the line
+    // crawling across a pixel as the window slides.
+    const double pixelRatio = std::max(view.pixelRatio, 1.0);
     const auto place = [&](double px, double py) {
+        if (std::isfinite(px)) {
+            // The pixel is floor of this. A logarithmic column edge that
+            // falls on a pixel boundary comes back an ulp under that integer
+            // from one libm and an ulp over it from the other, and floor gives
+            // them different pixels. The golden sum of data x then misses its
+            // relative 1e-9, while the sum of the pixels can still agree when
+            // another edge steps the other way. A millionth of a pixel is
+            // still that boundary. A real sample is nowhere near it.
+            const double scaled = px * pixelRatio;
+            const double nearest = std::nearbyint(scaled);
+            if (std::abs(scaled - nearest) <= 1e-6) {
+                px = nearest / pixelRatio;
+            }
+            px = (std::floor(px * pixelRatio) + 0.5) / pixelRatio;
+        }
         if (open < 0) {
             open = static_cast<int>(points.size());
         }
@@ -368,25 +370,11 @@ PlotProjected projectLine(const PlotLine& line, const PlotAxis& axis, const Plot
     };
 
     const auto count = static_cast<std::int64_t>(line.count);
-
-    if (axis.explicitX() || line.xs != nullptr) {
-        // A time base is not required to be monotonic and is not required to
-        // be evenly spaced, so neither the window narrowing nor the envelope
-        // below applies to it: a pixel column would hold samples from all over
-        // the line, and the extremes of that are an envelope of nothing. Every
-        // sample is drawn at its own x.
-        //
-        // That is affordable because a line drawn against a time base is a
-        // custom plot entry, and those are thinned on the way out of the file
-        // like everything else. It would not be affordable for an arbitrary
-        // dataset, which is why this is the one path without a bound.
-        //
-        // A line that states its own x comes here too, for the same reason and
-        // with a better bound: it was folded to the pane's columns before it
-        // was handed over, so it is two points a column at most.
-        for (std::int64_t i = 0; i < count; ++i) {
+    const auto xAt = [&](std::int64_t i) { return xOf(line, axis, i); };
+    const auto drawRange = [&](std::int64_t from, std::int64_t to) {
+        for (std::int64_t i = from; i <= to; ++i) {
             const double value = line.values[i];
-            const double x = xOf(line, axis, i);
+            const double x = xAt(i);
             if (!yMap.draws(value) || !xMap.draws(x)) {
                 closeRun();
                 continue;
@@ -394,14 +382,71 @@ PlotProjected projectLine(const PlotLine& line, const PlotAxis& axis, const Plot
             place(toX(x), toY(value));
         }
         closeRun();
-        // Every point here was drawn, so nothing was summarised *by this* --
-        // but a time base does not make a line of summaries into a line of
-        // samples. A custom tab's entry is folded on the way out of the file
-        // like every other line, and the axis it is drawn against has no
-        // bearing on what its values are. This said `false` outright, which is
-        // how an entry drawn against a time base kept its dots at every zoom.
+    };
+
+    // A stated x is already a fold, one or two points a column. A time base
+    // that turns around, or that has a hole, is not a column of anything: the
+    // samples in one pixel would come from all over the line. Both are drawn
+    // sample for sample. An ascending time base is a column, below.
+    const bool located = line.positions != nullptr || axis.explicitX();
+    const auto ascending = [&]() {
+        if (count < 2) {
+            return true;
+        }
+        double previous = xAt(0);
+        if (!std::isfinite(previous)) {
+            return false;
+        }
+        for (std::int64_t i = 1; i < count; ++i) {
+            const double x = xAt(i);
+            if (!std::isfinite(x) || x < previous) {
+                return false;
+            }
+            previous = x;
+        }
+        return true;
+    };
+    const bool ordered = !located || ascending();
+    if (line.xs != nullptr || (axis.explicitX() && !ordered)) {
+        drawRange(0, count - 1);
+        // Nothing here was summarised by this. A time base does not make a
+        // line of summaries into a line of samples: the line says what its
+        // values are, and the axis has no bearing on that.
         return added(line.summarised);
     }
+
+    // First index whose x is at least `edge`, and the first whose x is past
+    // it. The line is ascending here, which is what makes the bisection an
+    // answer. A sample that lands on an edge belongs to the column that
+    // starts there.
+    const auto lowerBound = [&](double edge) {
+        std::int64_t lo = 0;
+        std::int64_t hi = count;
+        while (lo < hi) {
+            const std::int64_t mid = lo + (hi - lo) / 2;
+            if (!(xAt(mid) >= edge)) {
+                lo = mid + 1;
+            }
+            else {
+                hi = mid;
+            }
+        }
+        return lo;
+    };
+    const auto upperBound = [&](double edge) {
+        std::int64_t lo = 0;
+        std::int64_t hi = count;
+        while (lo < hi) {
+            const std::int64_t mid = lo + (hi - lo) / 2;
+            if (!(xAt(mid) > edge)) {
+                lo = mid + 1;
+            }
+            else {
+                hi = mid;
+            }
+        }
+        return lo;
+    };
 
     // x is affine in the sample index, so the window can be turned back into a
     // range of indices and the samples outside it never touched.
@@ -416,7 +461,20 @@ PlotProjected projectLine(const PlotLine& line, const PlotAxis& axis, const Plot
 
     std::int64_t first = 0;
     std::int64_t last = count - 1;
-    if (line.positions != nullptr) {
+    if (axis.explicitX()) {
+        // One sample either side, as the affine window below. The bounds are
+        // the times themselves: the index is whatever sample sits there.
+        const double low = std::min(view.xMin, view.xMax);
+        const double high = std::max(view.xMin, view.xMax);
+        if (!std::isfinite(low) || !std::isfinite(high)) {
+            return {};
+        }
+        const std::int64_t from = lowerBound(low);
+        const std::int64_t to = upperBound(high);
+        first = std::max<std::int64_t>(from - 1, 0);
+        last = std::min<std::int64_t>(to, count - 1);
+    }
+    else if (line.positions != nullptr) {
         // Not evenly spaced, so the window is not a division: it is a range of
         // positions, and they are written in order. One point either side of
         // it, for the reason the even case below gives.
@@ -461,200 +519,230 @@ PlotProjected projectLine(const PlotLine& line, const PlotAxis& axis, const Plot
         return {};
     }
 
-    const std::int64_t visible = last - first + 1;
-    // The physical columns the pane has, not the logical ones. See
-    // PlotView::pixelRatio: on a HiDPI display those differ by two or three,
-    // and summarising to the logical count throws away exactly that factor
-    // before a pixel is touched.
-    std::int64_t columns = static_cast<std::int64_t>(std::ceil(w * std::max(view.pixelRatio, 1.0)));
+    // One column per device pixel. Rounded, not ceiled: that is the column
+    // the pane has, and maxColumns is still the line's share of the vertices.
+    // The grid is anchored at zero -- at one, on a logarithmic axis -- rather
+    // than at the window, so a pan of less than a column leaves every sample
+    // in the column it was in. That is what stops the line boiling as it
+    // slides. The y at an edge is the chord between the two samples the edge
+    // falls between, and it lengthens both columns; it is not another sample.
+    // A column of more than one sample that stands at least a pixel tall is
+    // the vertical in its middle, and the stroke ends there. Anything
+    // shallower is the chord from edge to edge. No such column, and the
+    // samples themselves are the line. See Levels.hpp.
+    std::int64_t columns = std::llround(w * pixelRatio);
     if (view.maxColumns > 0) {
         columns = std::min<std::int64_t>(columns, view.maxColumns);
     }
     columns = std::max<std::int64_t>(columns, 1);
 
-    if (visible <= static_cast<std::int64_t>(kSamplesPerColumn) * columns) {
-        // Zoomed in far enough that the envelope would emit more vertices than
-        // there are values. Draw them.
-        for (std::int64_t i = first; i <= last; ++i) {
-            const double value = line.values[i];
-            const double x =
-                line.positions != nullptr ? xOf(line, axis, i) : x0 + static_cast<double>(i) * dx;
-            if (!yMap.draws(value) || !xMap.draws(x)) {
-                closeRun();
-                continue;
-            }
-            place(toX(x), toY(value));
-        }
-        closeRun();
-        // ...and they are samples only if the model did not summarise them on
-        // the way here. Each value of an envelope is the extreme of a bucket,
-        // and a marker on it would be punctuation on a reading nobody took.
-        // This is not the same question as whether the loop above ran: a
-        // summary fine enough to fit four points in a column is still a
-        // summary.
-        //
-        // The line says so itself rather than being guessed at from its step,
-        // which is where this was read from and which is wrong at both ends --
-        // see PlotLine::summarised.
-        return added(line.summarised);
-    }
-
-    // The envelope, over buckets that are a power of two wide and aligned to
-    // the data's own index space -- bucket b is always exactly the samples
-    // [b * size, (b + 1) * size), whatever the reader is looking at.
-    //
-    // That alignment is the whole point of doing it this way. The obvious
-    // arrangement is to divide the *visible* range into as many buckets as the
-    // pane has columns, and it looks right in a screenshot and wrong in motion:
-    // panning by one pixel slides every bucket boundary by a fraction of a
-    // sample, so the two extremes each column selects keep changing and the
-    // line crawls and boils under the pointer. Aligned buckets cannot do that.
-    // Panning changes which buckets are on screen and nothing about what is in
-    // them, so the line translates rigidly; zooming steps from one power of two
-    // to the next, which is one honest change of detail per octave instead of a
-    // continuous shimmer.
-    //
-    // It is also what makes each frame cost the pane rather than the data: the
-    // scan below touches the visible samples once, and the bucket size is
-    // chosen so that there are between one and two buckets per column.
-    //
-    // A logarithmic x axis is the one case where "a bucket is a column" stops
-    // being true, and the alternative is worse. Buckets are aligned in the
-    // data's index space and a decade near the origin holds very few indices,
-    // so on a log axis the leftmost buckets are wide on the pane and the
-    // rightmost are narrow: the left of such a plot is summarised more coarsely
-    // than the pane could show. That is honest -- those really are all the
-    // samples that decade has, and each bucket still carries both its extremes
-    // -- and it resolves the moment the reader zooms, because the run they are
-    // looking at is read again at a finer bucket like any other. Bucketing in
-    // log space instead would slide every boundary with the pan, which is the
-    // crawling this alignment exists to prevent.
-    //
-    // That paragraph was wrong about the zoom, and the reader saw it. Every
-    // run was bucketed by element too, so the left of the pane stayed an order
-    // of magnitude coarser for every decade on screen however far they zoomed,
-    // and the first bucket's worth of the axis had nothing drawn in it at all.
-    // A window of an octave or more on a logarithmic axis no longer reaches
-    // this loop: the models fold it per pixel column on a grid aligned in the
-    // logarithm -- which answers the crawling as well, because the grid is
-    // fixed and the pan only moves which of it is on screen -- and hand it over
-    // with its own x. See LogColumns in Levels.hpp and the branch above.
-    // Under an octave, the difference between the widest and narrowest
-    // column is under two, and this is still the right place for it.
-    //
-    // Within a bucket the smallest and the largest are emitted in the order
-    // they occur, so the stroke keeps the direction the data has -- and this is
-    // what stride sampling cannot do at all. A spike one sample wide is the
-    // extreme of whatever bucket it lands in, so it is selected *because* it is
-    // extreme, where a stride selects by position and reaches it only by luck.
-    const double perColumn = static_cast<double>(visible) / static_cast<double>(columns);
-    std::int64_t size = 1;
-    // Ceiling to a power of two. Bounded rather than open, because a perColumn
-    // that has gone to infinity under a degenerate view would otherwise not
-    // stop.
-    while (static_cast<double>(size) < perColumn && size < (std::int64_t{1} << 40)) {
-        size <<= 1;
-    }
-
-    const std::int64_t firstBucket = first / size;
-    const std::int64_t lastBucket = last / size;
-    for (std::int64_t b = firstBucket; b <= lastBucket; ++b) {
-        const std::int64_t i0 = b * size;
-        // Clamped by the data and not by the window: a bucket at the edge of
-        // the pane holds what it holds, or it would change as the reader
-        // scrolled it into view.
-        const std::int64_t i1 = std::min(i0 + size - 1, count - 1);
-
-        double lowest = std::numeric_limits<double>::infinity();
-        double highest = -std::numeric_limits<double>::infinity();
-        std::int64_t lowIndex = -1;
-        std::int64_t highIndex = -1;
-        for (std::int64_t i = i0; i <= i1; ++i) {
-            const double value = line.values[i];
-            // The axis decides what counts, which on a logarithmic one takes
-            // the non-positive samples out of the extremes as well as out of
-            // the drawing. A bucket whose only large value cannot be drawn has
-            // not got that value; leaving it in would put the top of the
-            // envelope at a place the curve never reaches.
-            if (!yMap.draws(value)) {
-                continue;
-            }
-            if (value < lowest) {
-                lowest = value;
-                lowIndex = i;
-            }
-            if (value > highest) {
-                highest = value;
-                highIndex = i;
+    const bool indexGrid = !located && std::abs(dx) > 0.0;
+    const bool locatedGrid = located && ordered;
+    const double xLowBound = std::min(view.xMin, view.xMax);
+    const double xHighBound = std::max(view.xMin, view.xMax);
+    if ((indexGrid || locatedGrid) && xHighBound > xLowBound &&
+        !(view.xLog && !(xLowBound > 0.0))) {
+        const double width = (xHighBound - xLowBound) / static_cast<double>(columns);
+        std::vector<double> edges(static_cast<std::size_t>(columns) + 1);
+        bool edgesOk = width > 0.0 && std::isfinite(width);
+        if (edgesOk && !view.xLog) {
+            const double k0 = std::floor(xLowBound / width + 0.5);
+            for (std::int64_t i = 0; i <= columns; ++i) {
+                edges[static_cast<std::size_t>(i)] = (k0 + static_cast<double>(i)) * width;
             }
         }
-        if (lowIndex < 0) {
-            // The whole bucket is a gap.
-            closeRun();
-            continue;
+        else if (edgesOk) {
+            const double p0 = std::log(xLowBound);
+            const double p1 = std::log(xHighBound);
+            const double logWidth = (p1 - p0) / static_cast<double>(columns);
+            edgesOk = logWidth > 0.0 && std::isfinite(logWidth);
+            if (edgesOk) {
+                const double k0 = std::floor(p0 / logWidth + 0.5);
+                for (std::int64_t i = 0; i <= columns; ++i) {
+                    edges[static_cast<std::size_t>(i)] =
+                        std::exp((k0 + static_cast<double>(i)) * logWidth);
+                }
+            }
         }
-
-        // The stroke out of the bucket, to the next one's first sample: the
-        // edge sits on that sample, so all of the stroke is in this column,
-        // and without it the column is drawn short and the segment to the next
-        // one runs between two extremes the line never joined. See the seam
-        // in Levels.hpp. Only for a line of samples -- a summary's pairs were
-        // folded with their seams, and the next value of one is the next
-        // bucket's earlier extreme, not its first sample. And only between
-        // two samples the axes can place, for the reason every gap is one.
-        if (!line.summarised && i1 + 1 < count) {
-            const double exit = line.values[i1];
-            const double entry = line.values[i1 + 1];
-            const auto placed = [&](std::int64_t i) {
-                return xMap.draws(line.positions != nullptr ? xOf(line, axis, i)
-                                                            : x0 + static_cast<double>(i) * dx);
+        if (edgesOk) {
+            const auto accept = [&](std::int64_t i, double x) -> std::optional<double> {
+                const double value = line.values[i];
+                if (!yMap.draws(value) || !xMap.draws(x)) {
+                    return {};
+                }
+                return value;
             };
-            if (yMap.draws(exit) && yMap.draws(entry) && placed(i1) && placed(i1 + 1)) {
-                if (entry < lowest) {
-                    lowest = entry;
-                    lowIndex = i1 + 1;
+            const auto chordIndex = [&](double t) -> std::optional<double> {
+                const double lastIndex = static_cast<double>(count - 1);
+                if (!std::isfinite(t) || t < 0.0) {
+                    return {};
                 }
-                else if (entry > highest) {
-                    highest = entry;
-                    highIndex = i1 + 1;
+                if (t >= lastIndex) {
+                    return accept(count - 1, x0 + lastIndex * dx);
                 }
+                const double rounded = std::round(t);
+                if (std::abs(t - rounded) <= 1e-9) {
+                    const auto i = static_cast<std::int64_t>(rounded);
+                    return accept(i, x0 + static_cast<double>(i) * dx);
+                }
+                const auto iNext = static_cast<std::int64_t>(std::ceil(t));
+                const auto iPrev = iNext - 1;
+                if (iPrev < 0 || iNext >= count) {
+                    return {};
+                }
+                const auto yPrev = accept(iPrev, x0 + static_cast<double>(iPrev) * dx);
+                const auto yNext = accept(iNext, x0 + static_cast<double>(iNext) * dx);
+                if (!yPrev || !yNext) {
+                    return {};
+                }
+                return *yPrev + (t - static_cast<double>(iPrev)) * (*yNext - *yPrev);
+            };
+            const auto chordAt = [&](double edge) -> std::optional<double> {
+                if (indexGrid) {
+                    return chordIndex((edge - x0) / dx);
+                }
+                const std::int64_t next = upperBound(edge);
+                if (next <= 0) {
+                    return {};
+                }
+                if (next >= count) {
+                    const double x = xAt(count - 1);
+                    if (edge > x) {
+                        return {};
+                    }
+                    return accept(count - 1, x);
+                }
+                const std::int64_t prev = next - 1;
+                const double xPrev = xAt(prev);
+                const double xNext = xAt(next);
+                const auto yPrev = accept(prev, xPrev);
+                const auto yNext = accept(next, xNext);
+                if (!yPrev || !yNext) {
+                    return {};
+                }
+                if (xPrev == edge || !(xNext > xPrev)) {
+                    return yPrev;
+                }
+                return *yPrev + (edge - xPrev) / (xNext - xPrev) * (*yNext - *yPrev);
+            };
+            const auto include = [](double& low, double& high, double y) {
+                if (!std::isfinite(y)) {
+                    return;
+                }
+                if (!std::isfinite(low)) {
+                    low = high = y;
+                    return;
+                }
+                if (y < low) {
+                    low = y;
+                }
+                else if (y > high) {
+                    high = y;
+                }
+            };
+
+            const double quiet = std::numeric_limits<double>::quiet_NaN();
+            std::vector<double> columnLow(static_cast<std::size_t>(columns), quiet);
+            std::vector<double> columnHigh(static_cast<std::size_t>(columns), quiet);
+            std::vector<int> columnCount(static_cast<std::size_t>(columns), 0);
+            int most = 0;
+            for (std::int64_t column = 0; column < columns; ++column) {
+                const double leftEdge = edges[static_cast<std::size_t>(column)];
+                const double rightEdge = edges[static_cast<std::size_t>(column + 1)];
+                std::int64_t start = 0;
+                std::int64_t end = 0;
+                if (indexGrid) {
+                    double a = (leftEdge - x0) / dx;
+                    double b = (rightEdge - x0) / dx;
+                    if (a > b) {
+                        std::swap(a, b);
+                    }
+                    if (std::isfinite(a) && std::isfinite(b)) {
+                        const double startD = std::ceil(a - 1e-9);
+                        const double endD = std::floor(b - 1e-9) + 1.0;
+                        start = static_cast<std::int64_t>(
+                            std::clamp(startD, 0.0, static_cast<double>(count)));
+                        end = static_cast<std::int64_t>(
+                            std::clamp(endD, 0.0, static_cast<double>(count)));
+                    }
+                }
+                else {
+                    start = lowerBound(leftEdge);
+                    end = lowerBound(rightEdge);
+                }
+                if (end < start) {
+                    end = start;
+                }
+                double& low = columnLow[static_cast<std::size_t>(column)];
+                double& high = columnHigh[static_cast<std::size_t>(column)];
+                int& n = columnCount[static_cast<std::size_t>(column)];
+                for (std::int64_t i = start; i < end; ++i) {
+                    const double value = line.values[i];
+                    if (!yMap.draws(value)) {
+                        continue;
+                    }
+                    include(low, high, value);
+                    ++n;
+                }
+                if (const std::optional<double> y = chordAt(leftEdge)) {
+                    include(low, high, *y);
+                }
+                if (const std::optional<double> y = chordAt(rightEdge)) {
+                    include(low, high, *y);
+                }
+                most = std::max(most, n);
+            }
+            if (most > 1) {
+                bool linked = false;
+                for (std::int64_t column = 0; column < columns; ++column) {
+                    const double leftEdge = edges[static_cast<std::size_t>(column)];
+                    const double rightEdge = edges[static_cast<std::size_t>(column + 1)];
+                    const double low = columnLow[static_cast<std::size_t>(column)];
+                    const double high = columnHigh[static_cast<std::size_t>(column)];
+                    const bool tall = columnCount[static_cast<std::size_t>(column)] > 1 &&
+                                       yMap.draws(low) && yMap.draws(high) &&
+                                       std::abs(yMap.fractionOf(high) - yMap.fractionOf(low)) * h >=
+                                           1.0;
+                    if (tall) {
+                        if (linked) {
+                            closeRun();
+                            linked = false;
+                        }
+                        const double mid = 0.5 * (leftEdge + rightEdge);
+                        if (xMap.draws(mid)) {
+                            place(toX(mid), toY(low));
+                            place(toX(mid), toY(high));
+                        }
+                        closeRun();
+                        continue;
+                    }
+                    const std::optional<double> yLeft = chordAt(leftEdge);
+                    const std::optional<double> yRight = chordAt(rightEdge);
+                    if (!yLeft || !yRight || !xMap.draws(leftEdge) || !xMap.draws(rightEdge)) {
+                        if (linked) {
+                            closeRun();
+                            linked = false;
+                        }
+                        continue;
+                    }
+                    if (!linked) {
+                        place(toX(leftEdge), toY(*yLeft));
+                    }
+                    place(toX(rightEdge), toY(*yRight));
+                    linked = true;
+                }
+                closeRun();
+                return added(true);
             }
         }
-
-        // Each extreme where it is. The scan above kept its index, so this
-        // costs nothing to say. Both used to stand at the bucket's start and
-        // its middle, which put a spike on the bucket's last sample half a
-        // bucket early and split a straight rise across two columns by distance
-        // rather than by where it went. A line that names its positions names
-        // them here too -- an envelope folded again for a narrower pane draws
-        // each extreme at the element it is, not at its place in the summary.
-        const auto xAt = [&](std::int64_t i) {
-            return line.positions != nullptr ? xOf(line, axis, i)
-                                             : x0 + static_cast<double>(i) * dx;
-        };
-        const double xLow = xAt(lowIndex);
-        const double xHigh = xAt(highIndex);
-        if (!xMap.draws(xLow) || !xMap.draws(xHigh)) {
-            // Both stations of a bucket are on the axis or the bucket is not
-            // drawn, which on a logarithmic axis is every bucket at or below
-            // zero. A gap, for the reason every gap here is one.
-            closeRun();
-            continue;
-        }
-        if (lowIndex == highIndex) {
-            place(toX(xLow), toY(lowest));
-        }
-        else if (lowIndex < highIndex) {
-            place(toX(xLow), toY(lowest));
-            place(toX(xHigh), toY(highest));
-        }
-        else {
-            place(toX(xHigh), toY(highest));
-            place(toX(xLow), toY(lowest));
-        }
     }
-    closeRun();
-    return added(true);
+
+    // No column held two samples, so these are the line: one either side of
+    // the window, which is what `first` and `last` already reach. They are
+    // samples only when the model did not summarise them on the way here.
+    drawRange(first, last);
+    return added(line.summarised);
+
 }
 
 std::optional<NearestSample> nearestSample(std::span<const PlotLine> lines,

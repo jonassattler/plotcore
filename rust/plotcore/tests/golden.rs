@@ -284,12 +284,18 @@ fn run(script: &str) -> Vec<String> {
         }
         let w: Vec<&str> = line.split(' ').collect();
         let sample = |last: &Option<Scene>, line: i32, at: usize| -> [f64; 2] {
-            last.as_ref()
-                .and_then(|s| s.lines.iter().find(|d| d.line == line))
-                .and_then(|d| d.runs.first())
-                .and_then(|run| run.get(at))
-                .copied()
-                .unwrap_or_else(|| panic!("no sample {at} of line {line}"))
+            let mut seen = 0usize;
+            if let Some(scene) = last {
+                if let Some(drawn) = scene.lines.iter().find(|d| d.line == line) {
+                    for run in &drawn.runs {
+                        if at < seen + run.len() {
+                            return run[at - seen];
+                        }
+                        seen += run.len();
+                    }
+                }
+            }
+            panic!("no sample {at} of line {line}")
         };
         let result = match w[0] {
             "size" => figure.set_size(number(w[1]), number(w[2]), number(w[3])),

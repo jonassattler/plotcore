@@ -127,7 +127,9 @@ def test_a_reader_is_asked_below_the_base_and_let_go_exactly_once():
     figure.set_view(4000, 4100, 0, 1 << 20)
     scene = figure.scene()
     assert asked, "a window under the base is read"
-    assert scene.lines[0].values[0][:, 1] == pytest.approx(scene.lines[0].values[0][:, 0], abs=1e-6)
+    # y is the element. x is that element's device-pixel centre, which is
+    # closer to it than the next sample is.
+    assert scene.lines[0].values[0][:, 1] == pytest.approx(scene.lines[0].values[0][:, 0], abs=0.5)
     figure.remove_line(0)
     assert len(_readers) == 0, "removing the line lets its reader go"
 

@@ -541,11 +541,15 @@ double Camera::dataYAt(double py, double px) const
 // already said where they are going. Then the window moves, and the
 // bindings under it push the range.
 //
-// A band under a few pixels in either direction is a slip rather than a
-// request: a two-pixel-tall window is a magnification of several hundred
-// on an axis the reader never meant to touch, and the way out of it would
-// be a reset. Refused whole rather than clamped to one axis, because
-// which axis was meant is not something this can know.
+// A band under a few pixels on a side it is about to take is a slip rather
+// than a request: a two-pixel-tall window is a magnification of several
+// hundred on an axis the reader never meant to touch, and the way out of
+// it would be a reset. Refused whole. Which sides are taken is the wheel's
+// choice: Shift the direction across the pane, Control the one up it, and
+// either both of those or neither is both. A side that is not taken is the
+// whole pane, so its length is not a slip and its window is left where it
+// was. On a flipped pane the request is swapped the way zoomAt swaps it, so
+// Shift is still across the pane whichever data axis that is.
 //
 // The band's top edge is the axis's larger value -- see dataYAt -- and
 // its right edge too; on a flipped pane those are x's and y's the
@@ -557,7 +561,7 @@ double Camera::dataYAt(double py, double px) const
 // wide on a pane of six is six times in however many units that
 // decade holds. Taken the linear way, a band over the first decades of
 // a wide axis sent the read to the far end of it.
-bool Camera::zoomToRegion(double px0, double py0, double px1, double py1,
+bool Camera::zoomToRegion(double px0, double py0, double px1, double py1, ZoomAxes axes,
                           std::optional<GestureFocus>* focus)
 {
     if (area.width <= 0.0 || area.height <= 0.0) {
@@ -567,21 +571,40 @@ bool Camera::zoomToRegion(double px0, double py0, double px1, double py1,
     const double right = std::max(px0, px1);
     const double top = std::min(py0, py1);
     const double bottom = std::max(py0, py1);
-    if (right - left < minimumBand || bottom - top < minimumBand) {
+    const bool across = axes != ZoomAxes::Y;
+    const bool up = axes != ZoomAxes::X;
+    if ((across && right - left < minimumBand) || (up && bottom - top < minimumBand)) {
         return false;
+    }
+    // The pane's directions, named before the flip. Afterwards, which data
+    // axis that is: across the pane is data y once x runs up it.
+    ZoomAxes which = axes;
+    if (flipped) {
+        which = axes == ZoomAxes::X ? ZoomAxes::Y : axes == ZoomAxes::Y ? ZoomAxes::X : axes;
     }
     const double x0 = dataXAt(left, bottom);
     const double x1 = dataXAt(right, top);
     const double y0 = dataYAt(bottom, left);
     const double y1 = dataYAt(top, right);
-    const double span = axisPosition(viewMaxX(), x.logarithmic, x.base) -
-                        axisPosition(viewMinX(), x.logarithmic, x.base);
-    const double band =
-        axisPosition(x1, x.logarithmic, x.base) - axisPosition(x0, x.logarithmic, x.base);
-    if (focus != nullptr && span > 0.0 && band > 0.0) {
-        *focus = GestureFocus{valueAlong(x0, x1, 0.5, x.logarithmic, x.base), span / band};
+    if (which != ZoomAxes::Y) {
+        const double span = axisPosition(viewMaxX(), x.logarithmic, x.base) -
+                            axisPosition(viewMinX(), x.logarithmic, x.base);
+        const double band =
+            axisPosition(x1, x.logarithmic, x.base) - axisPosition(x0, x.logarithmic, x.base);
+        if (focus != nullptr && span > 0.0 && band > 0.0) {
+            *focus = GestureFocus{valueAlong(x0, x1, 0.5, x.logarithmic, x.base), span / band};
+        }
+        const Span want = positiveSpan(std::min(x0, x1), std::max(x0, x1), x.bounds.low,
+                                       x.bounds.high, x.logarithmic);
+        x.view = viewedAxis(x.bounds.low, x.bounds.high, want.low, want.high, x.logarithmic, x.base,
+                            x.minimumSpan, maxZoom, panKeep);
     }
-    setViewRange(x0, x1, y0, y1);
+    if (which != ZoomAxes::X) {
+        const Span want = positiveSpan(std::min(y0, y1), std::max(y0, y1), y.bounds.low,
+                                       y.bounds.high, y.logarithmic);
+        y.view = viewedAxis(y.bounds.low, y.bounds.high, want.low, want.high, y.logarithmic, y.base,
+                            y.minimumSpan, maxZoom, panKeep);
+    }
     return true;
 }
 

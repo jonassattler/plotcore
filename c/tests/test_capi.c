@@ -169,10 +169,20 @@ static void contract(void)
     CHECK(scene != NULL && plotcore_scene_line_count(scene) == 2);
     plotcore_line_info info;
     CHECK(plotcore_scene_line(scene, 1, &info) == PLOTCORE_OK);
-    CHECK(info.line == 1 && info.run_count == 1);
-    CHECK(plotcore_scene_line_run_length(scene, 1, 0) == 300);
-    const double* run = plotcore_scene_line_run(scene, 1, 0);
-    CHECK(run != NULL && run[0] < run[2]);
+    CHECK(info.line == 1 && info.run_count > 1);
+    int64_t points = 0;
+    int vertical = 0;
+    for (int64_t run = 0; run < info.run_count; ++run) {
+        const int64_t count = plotcore_scene_line_run_length(scene, 1, run);
+        const double* xy = plotcore_scene_line_run(scene, 1, run);
+        CHECK(count >= 2 && xy != NULL);
+        points += count;
+        if (count == 2 && xy[0] == xy[2] && xy[1] != xy[3]) {
+            vertical = 1;
+        }
+    }
+    CHECK(vertical == 1);
+    CHECK(points > 2 && points <= 1280);
     CHECK(info.triangle_points % 3 == 0 && info.triangle_points > 0);
     CHECK(plotcore_scene_over_count(scene) > 0);
     plotcore_mark mark;
@@ -199,9 +209,13 @@ static void contract(void)
     request.forms = PLOTCORE_FORM_STRIPS;
     scene = plotcore_scene_request_new(figure, &request);
     CHECK(scene != NULL && plotcore_scene_line(scene, 1, &info) == PLOTCORE_OK);
-    CHECK(info.run_count == 1 && info.triangle_points == 0);
+    CHECK(info.run_count > 1 && info.triangle_points == 0);
     CHECK(plotcore_scene_line_run(scene, 1, 0) == NULL);
-    CHECK(plotcore_scene_line_strip_length(scene, 1, 0) == 600);
+    int64_t strips = 0;
+    for (int64_t run = 0; run < info.run_count; ++run) {
+        strips += plotcore_scene_line_strip_length(scene, 1, run);
+    }
+    CHECK(strips >= 4 && strips <= 2560);
     plotcore_scene_free(scene);
     request.forms = PLOTCORE_FORM_ALL;
     request.picture = 1;
@@ -530,7 +544,9 @@ static const char* rest(const char* line, int skip)
     return at != NULL ? at : "";
 }
 
-/* Where sample `sample` of drawn line `line`'s first run is, in `last`. */
+/* Where drawn vertex `sample` of line `line` is, in `last`, counted across
+ * its runs. A vertical is a run of its own, so the vertex is not always in
+ * the first run. */
 static int sampleAt(plotcore_scene* last, int line, int64_t sample, double* x, double* y)
 {
     for (int64_t i = 0; last != NULL && i < plotcore_scene_line_count(last); ++i) {
@@ -539,13 +555,19 @@ static int sampleAt(plotcore_scene* last, int line, int64_t sample, double* x, d
         if (info.line != line || info.run_count < 1) {
             continue;
         }
-        if (sample >= plotcore_scene_line_run_length(last, i, 0)) {
-            return 0;
+        int64_t seen = 0;
+        for (int64_t run = 0; run < info.run_count; ++run) {
+            const int64_t count = plotcore_scene_line_run_length(last, i, run);
+            if (sample < seen + count) {
+                const double* xy = plotcore_scene_line_run(last, i, run);
+                const int64_t at = sample - seen;
+                *x = xy[2 * at];
+                *y = xy[2 * at + 1];
+                return 1;
+            }
+            seen += count;
         }
-        const double* xy = plotcore_scene_line_run(last, i, 0);
-        *x = xy[2 * sample];
-        *y = xy[2 * sample + 1];
-        return 1;
+        return 0;
     }
     return 0;
 }

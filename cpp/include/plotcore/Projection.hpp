@@ -28,11 +28,12 @@
 //    position and reaches an extremum only by luck;
 //    DatasetTableModel.hpp:205-213 names the cost, "a spike narrower than one
 //    stride is not drawn". An envelope selects the extremum *because* it is
-//    extreme, draws the same number of points, and cannot lose one. Each
-//    bucket takes in the first sample of the next one as well -- its seam, the
-//    stroke out of it, which lies in its own column (see Levels.hpp) -- or the
-//    segment between two columns is a line between two extremes that the data
-//    never drew.
+//    extreme, draws the same number of points, and cannot lose one. Of the
+//    samples themselves that envelope is one column per device pixel: the
+//    vertical from the column's minimum to its maximum, or the chord across
+//    it when the column is shallower than a pixel (see projectLine). A stored
+//    run coarser than the samples keeps the seam in Levels.hpp instead, because
+//    a bucket cannot recover a chord that falls inside it.
 //
 // 2. Double precision all the way to the vertex. QSGGeometry stores float32.
 //    An x of 1.7e9 -- seconds since the epoch, which is what every logger in

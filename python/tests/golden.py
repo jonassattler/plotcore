@@ -158,10 +158,15 @@ def run(script: Path) -> List[str]:
     scenes = 0
 
     def sample(line: int, index: int) -> Tuple[float, float]:
+        seen = 0
         for drawn in last.lines if last else []:
-            if drawn.line == line and drawn.runs and index < len(drawn.runs[0]):
-                x, y = drawn.runs[0][index]
-                return float(x), float(y)
+            if drawn.line != line:
+                continue
+            for run in drawn.runs:
+                if index < seen + len(run):
+                    x, y = run[index - seen]
+                    return float(x), float(y)
+                seen += len(run)
         raise IndexError(f"no sample {index} of line {line}")
 
     for raw in script.read_text(encoding="utf-8").splitlines():

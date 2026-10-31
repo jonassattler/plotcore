@@ -501,7 +501,12 @@ void Plot::foldCloser(Line& line) const
 
 bool Plot::foldLog(Line& line) const
 {
-    if (!xLog_ || !viewSet_) {
+    // A base of one sample is the line. The picture of it is the column
+    // envelope in projectLine, on a logarithmic axis as on a linear one, and
+    // that envelope reads the samples. Folding them onto the octave grid
+    // first would hand it a different line. A coarser base cannot answer an
+    // edge that falls inside a bucket, so it still folds here.
+    if (line.pyramid.baseBucket() == 1 || !xLog_ || !viewSet_) {
         return false;
     }
     const std::vector<double>* time = timeOf(line);
@@ -569,6 +574,17 @@ PlotLine Plot::drawLine(int line) const
         drawn.count = static_cast<long long>(held.foldValues.size());
         drawn.xs = held.foldXs.data();
         drawn.summarised = held.foldSummarised;
+        return drawn;
+    }
+    if (held.pyramid.baseBucket() == 1) {
+        // The samples, one per element, at step 1. projectLine lays the
+        // columns on them. A power-of-two window of the same line is about
+        // two points a column, and drawn as samples that is a different
+        // picture from the one the columns make.
+        const PyramidLevel& base = held.pyramid.levels.front();
+        drawn.values = base.values.data();
+        drawn.count = static_cast<long long>(base.values.size());
+        drawn.summarised = false;
         return drawn;
     }
     foldSummary(line_);
