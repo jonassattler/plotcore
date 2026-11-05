@@ -1700,3 +1700,696 @@ TEST_CASE("a line on paper is drawn solid, however many there are and whichever 
     // ...and the pane on screen is left as it was.
     REQUIRE(drawnOf(figure.scene(), 0).colour.alpha == drawnOf(screen, 0).colour.alpha);
 }
+
+// --- bars ---------------------------------------------------------------------------------
+
+namespace {
+
+/// A sawtooth with a period of `period` elements. Its stroke out of every period
+/// is a jump of the whole height, so a column that folded its elements alone
+/// would not touch the column after it wherever a period ends on an edge.
+std::vector<double> sawtooth(std::size_t count, std::size_t period)
+{
+    std::vector<double> values(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        values[i] = static_cast<double>(i % period) / static_cast<double>(period);
+    }
+    return values;
+}
+
+/// A figure of one line, zoomed to a window that is not a power of two samples
+/// a pixel, with bars on and the first scene taken.
+struct Barred
+{
+    Figure figure;
+    int line = 0;
+
+    explicit Barred(const std::vector<double>& values, double ratio = 1.0)
+    {
+        figure.setSize(800.0, 400.0, ratio);
+        line = figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
+        FigureSettings settings = figure.settings();
+        settings.bars = true;
+        figure.setSettings(settings);
+        (void)figure.scene();
+    }
+
+    [[nodiscard]] std::vector<Point> bars()
+    {
+        Scene scene = figure.scene();
+        REQUIRE(scene.lines.size() == 1);
+        return scene.lines[0].bars;
+    }
+};
+
+} // namespace
+
+TEST_CASE("bars are off until they are asked for", "[bars]")
+{
+    const std::vector<double> values = walk(100000);
+    Figure figure;
+    figure.setSize(800.0, 400.0);
+    (void)figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
+    const Scene scene = figure.scene();
+    REQUIRE(scene.lines[0].bars.empty());
+    REQUIRE(scene.lines[0].barValues.empty());
+    REQUIRE_FALSE(scene.lines[0].runs.empty());
+    REQUIRE(figure.plot().columnsFolded() == 0);
+}
+
+TEST_CASE("a dense line is one bar a device column and no stroke", "[bars]")
+{
+    const std::vector<double> values = walk(200000);
+    Barred barred(values);
+    const Scene scene = barred.figure.scene();
+    const DrawnLine& line = scene.lines[0];
+    REQUIRE(line.runs.empty());
+    REQUIRE(line.values.empty());
+    REQUIRE(line.triangles.empty());
+    REQUIRE(line.strips.empty());
+    REQUIRE(line.bars.size() == line.barValues.size());
+
+    const auto columns = static_cast<std::size_t>(std::ceil(scene.area.width));
+    REQUIRE(line.bars.size() == 2 * columns);
+    for (std::size_t c = 0; c < columns; ++c) {
+        const Point& topLeft = line.bars[2 * c];
+        const Point& bottomRight = line.bars[2 * c + 1];
+        // On whole pixels across, one wide and against the next, so nothing is
+        // blended twice and nothing is left between them.
+        REQUIRE(topLeft.x() == scene.area.x + static_cast<double>(c));
+        REQUIRE(bottomRight.x() == topLeft.x() + 1.0);
+        REQUIRE(bottomRight.y() > topLeft.y());
+    }
+}
+
+TEST_CASE("a column's bar is its elements and the stroke out of it", "[bars]")
+{
+    // Samples a column that is no power of two, over a line whose every period
+    // has a jump in it, so a run cut from the wrong place shows.
+    const std::vector<double> values = sawtooth(100000, 37);
+    Plot plot;
+    const int line = plot.addLine(values.data(), static_cast<long long>(values.size()));
+    const std::optional<ColumnGrid> grid = columnGridFor(1000.0, 8123.0, false, 10.0, 613.0);
+    REQUIRE(grid.has_value());
+    const DrawnColumns drawn = plot.drawColumns(line, *grid);
+    REQUIRE(drawn.count == 613);
+    for (int c = 0; c < drawn.count; ++c) {
+        const auto first = static_cast<std::size_t>(std::ceil(grid->edge(grid->first + c)));
+        const auto last = static_cast<std::size_t>(std::ceil(grid->edge(grid->first + c + 1)));
+        REQUIRE(last > first);
+        const auto begin = values.begin() + static_cast<std::ptrdiff_t>(first);
+        const auto end = values.begin() + static_cast<std::ptrdiff_t>(last) + 1; // the seam
+        REQUIRE(drawn.lows[c] == *std::min_element(begin, end));
+        REQUIRE(drawn.highs[c] == *std::max_element(begin, end));
+    }
+}
+
+TEST_CASE("two neighbouring bars always touch", "[bars]")
+{
+    // A square wave whose every jump is exactly on a column's edge, so a jump
+    // lies in no column's own elements and only the stroke out of a column
+    // reaches across it. Most data leaves that to chance: a line that fills its
+    // columns anyway touches with or without the rule.
+    const std::optional<ColumnGrid> grid = columnGridFor(0.0, 100000.0, false, 10.0, 700.0);
+    REQUIRE(grid.has_value());
+    std::vector<double> values(100000);
+    std::vector<std::size_t> edges;
+    for (long long k = grid->first; k <= grid->first + grid->count; ++k) {
+        edges.push_back(static_cast<std::size_t>(std::ceil(grid->edge(k))));
+    }
+    for (std::size_t c = 0; c + 1 < edges.size(); ++c) {
+        for (std::size_t i = edges[c]; i < std::min(edges[c + 1], values.size()); ++i) {
+            values[i] = c % 2 == 0 ? 0.0 : 1.0;
+        }
+    }
+
+    Plot plot;
+    const int line = plot.addLine(values.data(), static_cast<long long>(values.size()));
+    const DrawnColumns drawn = plot.drawColumns(line, *grid);
+    REQUIRE(drawn.count == 700);
+
+    int apartByElements = 0;
+    for (int c = 0; c + 1 < drawn.count; ++c) {
+        REQUIRE(drawn.lows[c] <= drawn.highs[c + 1]);
+        REQUIRE(drawn.lows[c + 1] <= drawn.highs[c]);
+        // Folded out of its elements alone, every column is flat, at one level
+        // or the other, and no column touches the next.
+        const auto first = static_cast<std::ptrdiff_t>(edges[static_cast<std::size_t>(c)]);
+        const auto last = static_cast<std::ptrdiff_t>(edges[static_cast<std::size_t>(c) + 1]);
+        REQUIRE(*std::min_element(values.begin() + first, values.begin() + last) ==
+                *std::max_element(values.begin() + first, values.begin() + last));
+        if (values[static_cast<std::size_t>(first)] != values[static_cast<std::size_t>(last)]) {
+            ++apartByElements;
+        }
+    }
+    REQUIRE(apartByElements == 699);
+}
+
+TEST_CASE("a spike one sample wide is the top of its column's bar", "[bars]")
+{
+    std::vector<double> values(300000, 0.0);
+    values[123456] = 100.0;
+    values[123457] = 0.0;
+    Barred barred(values);
+    const Scene scene = barred.figure.scene();
+    double highest = std::numeric_limits<double>::infinity();
+    for (std::size_t c = 0; c < scene.lines[0].bars.size(); c += 2) {
+        highest = std::min(highest, scene.lines[0].bars[c].y());
+    }
+    REQUIRE(highest < scene.area.y + scene.area.height / 2.0);
+}
+
+TEST_CASE("a pan folds only what it uncovers, and moves the rest rigidly", "[bars]")
+{
+    const std::vector<double> values = walk(400000);
+    Barred barred(values);
+    Figure& figure = barred.figure;
+    const double y0 = figure.camera().viewMinY();
+    const double y1 = figure.camera().viewMaxY();
+
+    figure.setViewRange(100000.0, 200000.0, y0, y1);
+    const std::vector<Point> before = barred.bars();
+    const auto columns = before.size() / 2;
+    const double width = figure.camera().viewMaxX() - figure.camera().viewMinX();
+    const double pixel = width / static_cast<double>(columns);
+
+    const long long folded = figure.plot().columnsFolded();
+    for (const int by : {1, 2, 5}) {
+        const double at = 100000.0 + by * pixel;
+        figure.setViewRange(at, at + width, y0, y1);
+        const std::vector<Point> after = barred.bars();
+        REQUIRE(after.size() == before.size());
+        const auto along = 2 * static_cast<std::size_t>(by);
+        for (std::size_t c = 0; c + along < before.size(); ++c) {
+            REQUIRE(after[c].y() == before[c + along].y());
+        }
+        figure.setViewRange(100000.0, 100000.0 + width, y0, y1);
+        (void)barred.bars();
+    }
+    // Over and back, each by that many columns, and nothing else.
+    REQUIRE(figure.plot().columnsFolded() - folded == 2 * (1 + 2 + 5));
+}
+
+TEST_CASE("a bar moves a whole device pixel or not at all", "[bars]")
+{
+    const std::vector<double> values = walk(400000);
+    Barred barred(values);
+    Figure& figure = barred.figure;
+    const double y0 = figure.camera().viewMinY();
+    const double y1 = figure.camera().viewMaxY();
+    figure.setViewRange(100000.0, 200000.0, y0, y1);
+    const std::vector<Point> before = barred.bars();
+    const double width = figure.camera().viewMaxX() - figure.camera().viewMinX();
+    const double pixel = width / static_cast<double>(before.size() / 2);
+    const std::optional<ColumnGrid> grid = columnGridFor(100000.0, 100000.0 + width, false, 10.0,
+                                                         static_cast<double>(before.size() / 2));
+    REQUIRE(grid.has_value());
+    // Far enough from a column's edge that a tenth of a pixel cannot cross it.
+    const double onGrid = static_cast<double>(grid->first) * grid->perColumn;
+    figure.setViewRange(onGrid, onGrid + width, y0, y1);
+    const std::vector<Point> placed = barred.bars();
+    const long long folded = figure.plot().columnsFolded();
+    figure.setViewRange(onGrid + 0.1 * pixel, onGrid + 0.1 * pixel + width, y0, y1);
+    const std::vector<Point> nudged = barred.bars();
+    REQUIRE(figure.plot().columnsFolded() == folded);
+    REQUIRE(nudged.size() == placed.size());
+    for (std::size_t c = 0; c < placed.size(); ++c) {
+        REQUIRE(nudged[c].x() == placed[c].x());
+        REQUIRE(nudged[c].y() == placed[c].y());
+    }
+}
+
+TEST_CASE("a y zoom folds nothing", "[bars]")
+{
+    const std::vector<double> values = walk(400000);
+    Barred barred(values);
+    Figure& figure = barred.figure;
+    const double y0 = figure.camera().viewMinY();
+    const double y1 = figure.camera().viewMaxY();
+    const double x0 = figure.camera().viewMinX();
+    const double x1 = figure.camera().viewMaxX();
+    const std::vector<Point> whole = barred.bars();
+    const long long folded = figure.plot().columnsFolded();
+    figure.setViewRange(x0, x1, y0, y0 + (y1 - y0) * 0.9);
+    const std::vector<Point> closer = barred.bars();
+    REQUIRE(figure.plot().columnsFolded() == folded);
+    REQUIRE(closer != whole);
+}
+
+TEST_CASE("a window of more columns than samples is stroked", "[bars]")
+{
+    const std::vector<double> values = walk(100000);
+    Barred barred(values);
+    Figure& figure = barred.figure;
+    const double y0 = figure.camera().viewMinY();
+    const double y1 = figure.camera().viewMaxY();
+
+    figure.setViewRange(1000.0, 1100.0, y0, y1);
+    Scene scene = figure.scene();
+    REQUIRE(scene.lines[0].bars.empty());
+    REQUIRE_FALSE(scene.lines[0].runs.empty());
+
+    // ...and back to bars the moment every column holds an element again, with
+    // no frame in between that draws from what was kept for the other window.
+    figure.setViewRange(1000.0, 5000.0, y0, y1);
+    scene = figure.scene();
+    REQUIRE_FALSE(scene.lines[0].bars.empty());
+    REQUIRE(scene.lines[0].runs.empty());
+}
+
+TEST_CASE("a window finer than a line is held at is stroked", "[bars]")
+{
+    const std::vector<double> values = walk(1 << 20);
+    Figure figure;
+    figure.setSize(800.0, 400.0);
+    figure.plot().setBudgetBytes(1 << 20);
+    const int line = figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
+    const long long base = figure.plot().baseBucket(line);
+    REQUIRE(base > 1);
+    FigureSettings settings = figure.settings();
+    settings.bars = true;
+    figure.setSettings(settings);
+    (void)figure.scene();
+    const double y0 = figure.camera().viewMinY();
+    const double y1 = figure.camera().viewMaxY();
+
+    // A bar cannot be cut finer than a bucket, and its neighbours would all
+    // come out as the same one.
+    figure.setViewRange(5000.0, 5000.0 + static_cast<double>(base) * 100.0, y0, y1);
+    REQUIRE(figure.scene().lines[0].bars.empty());
+    figure.setViewRange(0.0, static_cast<double>(1 << 20), y0, y1);
+    REQUIRE_FALSE(figure.scene().lines[0].bars.empty());
+}
+
+TEST_CASE("a time base decides what a column holds", "[bars]")
+{
+    const std::size_t count = 100000;
+    const std::vector<double> values = walk(static_cast<long long>(count));
+    std::vector<double> time(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        time[i] = 1000.0 + static_cast<double>(i) * 0.25;
+    }
+    Barred barred(values);
+    Figure& figure = barred.figure;
+    const auto timed = [&](const std::vector<double>& t) {
+        figure.plot().setTime(t.data(), static_cast<long long>(t.size()));
+        figure.resetView();
+        return figure.scene();
+    };
+
+    SECTION("one that runs one way is folded like an index")
+    {
+        const Scene scene = timed(time);
+        REQUIRE_FALSE(scene.lines[0].bars.empty());
+        REQUIRE(scene.lines[0].runs.empty());
+    }
+    SECTION("one that runs backwards is folded too, a column a run of elements")
+    {
+        const std::vector<Point> forward = timed(time).lines[0].bars;
+        std::vector<double> reversed(time.rbegin(), time.rend());
+        std::vector<double> mirrored(values.rbegin(), values.rend());
+        Figure other;
+        other.setSize(800.0, 400.0);
+        (void)other.plot().addLine(mirrored.data(), static_cast<long long>(mirrored.size()));
+        other.plot().setTime(reversed.data(), static_cast<long long>(reversed.size()));
+        FigureSettings settings = other.settings();
+        settings.bars = true;
+        other.setSettings(settings);
+        const Scene scene = other.scene();
+        REQUIRE(scene.lines[0].bars.size() == forward.size());
+    }
+    SECTION("one that doubles back is stroked")
+    {
+        std::vector<double> back = time;
+        std::swap(back[500], back[50000]);
+        const Scene scene = timed(back);
+        REQUIRE(scene.lines[0].bars.empty());
+        REQUIRE_FALSE(scene.lines[0].runs.empty());
+    }
+    SECTION("a pause longer than a column is stroked, because a stroke crosses it")
+    {
+        std::vector<double> paused = time;
+        for (std::size_t i = count / 2; i < count; ++i) {
+            paused[i] += 5000.0;
+        }
+        const Scene scene = timed(paused);
+        REQUIRE(scene.lines[0].bars.empty());
+        REQUIRE_FALSE(scene.lines[0].runs.empty());
+    }
+}
+
+TEST_CASE("a column with nothing finite in it is a gap between two bars", "[bars]")
+{
+    std::vector<double> values = walk(200000);
+    for (std::size_t i = 80000; i < 90000; ++i) {
+        values[i] = std::numeric_limits<double>::quiet_NaN();
+    }
+    Barred barred(values);
+    const Scene scene = barred.figure.scene();
+    const std::vector<Point>& bars = scene.lines[0].bars;
+    REQUIRE(scene.lines[0].runs.empty());
+    const auto columns = static_cast<std::size_t>(std::ceil(scene.area.width));
+    REQUIRE(bars.size() < 2 * columns);
+
+    // The gap is where the elements say it is, near enough for a pixel either
+    // side of it to be the seam's business.
+    const double perPixel = 200000.0 / scene.area.width;
+    const double from = scene.area.x + 80000.0 / perPixel + 2.0;
+    const double to = scene.area.x + 90000.0 / perPixel - 2.0;
+    for (std::size_t c = 0; c < bars.size(); c += 2) {
+        REQUIRE_FALSE((bars[c].x() >= from && bars[c].x() < to));
+    }
+}
+
+TEST_CASE("flipped, a bar lies across the pane, from where the line's values put it", "[bars]")
+{
+    const std::vector<double> values = walk(400000);
+    Barred barred(values);
+    FigureSettings settings = barred.figure.settings();
+    settings.flipped = true;
+    barred.figure.setSettings(settings);
+    const Scene scene = barred.figure.scene();
+    const std::vector<Point>& bars = scene.lines[0].bars;
+    REQUIRE(bars.size() == 2 * static_cast<std::size_t>(std::ceil(scene.area.height)));
+    const double bottom = scene.area.y + scene.area.height;
+    for (std::size_t c = 0; c < bars.size(); c += 2) {
+        // A column along the height now, the first of them at the bottom, and
+        // the corners still top left and then bottom right.
+        REQUIRE(bars[c + 1].x() > bars[c].x());
+        REQUIRE(bars[c + 1].y() == bottom - static_cast<double>(c / 2));
+        REQUIRE(bars[c].y() == bars[c + 1].y() - 1.0);
+    }
+}
+
+TEST_CASE("on a display of two, a stroke is two device columns and a bar is one", "[bars]")
+{
+    // One step up in the middle of the pane, with flat stretches either side:
+    // the bars at the step are the only ones with any height to them.
+    std::vector<double> values(400000, 0.0);
+    for (std::size_t i = 200000; i < values.size(); ++i) {
+        values[i] = 1.0;
+    }
+    Barred barred(values, 2.0);
+    const Scene scene = barred.figure.scene();
+    const std::vector<Point>& bars = scene.lines[0].bars;
+    const auto columns = static_cast<std::size_t>(std::ceil(scene.area.width * 2.0));
+    REQUIRE(bars.size() == 2 * columns);
+    REQUIRE(bars[1].x() - bars[0].x() == 0.5);
+
+    int tall = 0;
+    for (std::size_t c = 0; c < bars.size(); c += 2) {
+        const double height = bars[c + 1].y() - bars[c].y();
+        if (height > 50.0) {
+            ++tall;
+        }
+        else {
+            // A flat stretch as thick as the stroke, in logical pixels.
+            REQUIRE(height == Approx(1.0));
+        }
+    }
+    // Two device columns tall at the step: as wide as the flat stretches are
+    // thick, so a steep part of a line is not thinner than a level one.
+    REQUIRE(tall == 2);
+}
+
+TEST_CASE("past a line's share of the vertices a line is stroked", "[bars]")
+{
+    const std::vector<double> values = walk(4000);
+    Figure figure;
+    figure.setSize(800.0, 400.0);
+    FigureSettings settings = figure.settings();
+    settings.bars = true;
+    figure.setSettings(settings);
+    // A share of about five hundred columns, on a pane of over seven hundred.
+    for (int i = 0; i < 1000; ++i) {
+        (void)figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
+    }
+    const Scene many = figure.scene();
+    REQUIRE(many.lines[0].bars.empty());
+    REQUIRE_FALSE(many.lines[0].runs.empty());
+    while (figure.plot().lineCount() > 64) {
+        figure.plot().removeLine(figure.plot().lineCount() - 1);
+    }
+    REQUIRE_FALSE(figure.scene().lines[0].bars.empty());
+}
+
+TEST_CASE("a host that does not paint bars is handed the stroke", "[bars]")
+{
+    const std::vector<double> values = walk(200000);
+    Barred barred(values);
+    SceneRequest request;
+    request.geometry.bars = false;
+    const Scene scene = barred.figure.scene(request);
+    REQUIRE(scene.lines[0].bars.empty());
+    REQUIRE_FALSE(scene.lines[0].runs.empty());
+    REQUIRE_FALSE(scene.lines[0].triangles.empty());
+}
+
+TEST_CASE("a source that does not fold columns is stroked", "[bars]")
+{
+    class Silent : public LineSource
+    {
+    public:
+        explicit Silent(const std::vector<double>& values)
+        {
+            line_ = plot_.addLine(values.data(), static_cast<long long>(values.size()));
+        }
+        int lineCount() const override { return 1; }
+        std::string name(int) const override { return "silent"; }
+        long long length(int) const override { return plot_.length(line_); }
+        bool ready(int) const override { return true; }
+        LineExtent extent(int) const override { return plot_.extent(line_); }
+        Span xExtent(int) const override { return plot_.xExtent(line_); }
+        double xPositiveMinimum(int) const override { return plot_.xPositiveMinimum(line_); }
+        void setPaneColumns(int columns) override { plot_.setPaneColumns(columns); }
+        void setView(double low, double high, bool log) override { plot_.setView(low, high, log); }
+        PlotLine drawLine(int) const override { return plot_.drawLine(line_); }
+        PlotAxis drawAxis(int) const override { return plot_.drawAxis(line_); }
+
+    private:
+        Plot plot_;
+        int line_ = 0;
+    };
+
+    const std::vector<double> values = walk(200000);
+    Silent source(values);
+    Figure figure;
+    figure.setSize(800.0, 400.0);
+    figure.setSource(&source);
+    FigureSettings settings = figure.settings();
+    settings.bars = true;
+    figure.setSettings(settings);
+    const Scene scene = figure.scene();
+    REQUIRE(scene.lines[0].bars.empty());
+    REQUIRE_FALSE(scene.lines[0].runs.empty());
+}
+
+TEST_CASE("a bar's values are its corners in the data's own units", "[bars]")
+{
+    const std::vector<double> values = sawtooth(200000, 40000);
+    Barred barred(values);
+    const Scene scene = barred.figure.scene();
+    const DrawnLine& line = scene.lines[0];
+    REQUIRE(line.barValues.size() == line.bars.size());
+    const double span = scene.y.high - scene.y.low;
+    for (std::size_t c = 0; c < line.bars.size(); ++c) {
+        const double up = 1.0 - (line.bars[c].y() - scene.area.y) / scene.area.height;
+        REQUIRE(line.barValues[c].y() == Approx(scene.y.low + up * span));
+    }
+    // Across, a column's edges are the window's to within a pixel.
+    const double perPixel = (scene.x.high - scene.x.low) / scene.area.width;
+    REQUIRE(line.barValues.front().x() == Approx(scene.x.low).margin(perPixel));
+    REQUIRE(line.barValues.back().x() == Approx(scene.x.high).margin(perPixel));
+}
+
+TEST_CASE("bars are written in a view and read back", "[bars]")
+{
+    const std::vector<double> values = walk(100000);
+    Barred barred(values);
+    const std::string state = barred.figure.state();
+    REQUIRE(state.find("\"bars\":true") != std::string::npos);
+
+    Figure other;
+    other.setSize(800.0, 400.0);
+    (void)other.plot().addLine(values.data(), static_cast<long long>(values.size()));
+    REQUIRE_FALSE(other.settings().bars);
+    REQUIRE(other.restore(state));
+    REQUIRE(other.settings().bars);
+    REQUIRE_FALSE(other.scene().lines[0].bars.empty());
+}
+
+TEST_CASE("a picture's bars are as wide as its own pixels, and leave the pane's alone", "[bars]")
+{
+    const std::vector<double> values = walk(400000);
+    Barred barred(values);
+    const std::vector<Point> before = barred.bars();
+    const long long folded = barred.figure.plot().columnsFolded();
+
+    SceneRequest request;
+    request.picture = true;
+    request.width = 1600.0;
+    request.height = 800.0;
+    request.pixelRatio = 1.0;
+    const Scene picture = barred.figure.scene(request);
+    REQUIRE(picture.lines[0].bars.size() ==
+            2 * static_cast<std::size_t>(std::ceil(picture.area.width)));
+
+    const std::vector<Point> after = barred.bars();
+    REQUIRE(after == before);
+    // Folded once for the picture and once more when the pane came back.
+    REQUIRE(barred.figure.plot().columnsFolded() - folded > 0);
+}
+
+TEST_CASE("on a logarithmic y axis, a bar is what the fold can place", "[bars]")
+{
+    // Every column dips to zero, which has no place, beside values that do.
+    std::vector<double> values(300000);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        values[i] = i % 3 == 0 ? 0.0 : 10.0 + static_cast<double>(i % 7);
+    }
+    Barred barred(values);
+    FigureSettings settings = barred.figure.settings();
+    settings.yLog = true;
+    barred.figure.setSettings(settings);
+    const Scene scene = barred.figure.scene();
+    const std::vector<Point>& bars = scene.lines[0].bars;
+    REQUIRE_FALSE(bars.empty());
+    for (std::size_t c = 0; c < bars.size(); c += 2) {
+        // Its largest and nothing under it: a stroke's thickness, not a bar
+        // down to the bottom of the pane that no value reaches.
+        REQUIRE(bars[c + 1].y() - bars[c].y() == Approx(1.0));
+    }
+}
+
+TEST_CASE("on a logarithmic x axis, bars are drawn only where every column holds a sample",
+          "[bars]")
+{
+    const std::vector<double> values = walk(2000000);
+    Barred barred(values);
+    FigureSettings settings = barred.figure.settings();
+    settings.xLog = true;
+    barred.figure.setSettings(settings);
+    const double y0 = barred.figure.camera().viewMinY();
+    const double y1 = barred.figure.camera().viewMaxY();
+
+    SECTION("decades of it leave the sparse end with columns of nothing, so it is stroked")
+    {
+        barred.figure.setViewRange(1.0, 1000000.0, y0, y1);
+        const Scene scene = barred.figure.scene();
+        REQUIRE(scene.lines[0].bars.empty());
+        REQUIRE_FALSE(scene.lines[0].runs.empty());
+    }
+    SECTION("an octave high on the axis is dense all the way across")
+    {
+        barred.figure.setViewRange(500000.0, 1000000.0, y0, y1);
+        const Scene scene = barred.figure.scene();
+        REQUIRE(scene.lines[0].bars.size() ==
+                2 * static_cast<std::size_t>(std::ceil(scene.area.width)));
+        REQUIRE(scene.lines[0].runs.empty());
+    }
+}
+
+TEST_CASE("the crosshair reads a sample of a line drawn as bars", "[bars]")
+{
+    const std::vector<double> values = walk(200000);
+    Barred barred(values);
+    const Scene first = barred.figure.scene();
+    REQUIRE_FALSE(first.lines[0].bars.empty());
+    barred.figure.hover(first.area.x + first.area.width / 2.0,
+                        first.area.y + first.area.height / 2.0);
+    const Scene read = barred.figure.scene();
+    REQUIRE(read.reading.valid);
+    REQUIRE(read.reading.line == 0);
+    // A sample of the line, at about the middle of it: what it reads is
+    // measured, not a corner of a bar.
+    REQUIRE(read.reading.x == Approx(100000.0).margin(3000.0));
+    const auto at = static_cast<std::size_t>(std::llround(read.reading.x));
+    REQUIRE(std::find(values.begin(), values.end(), read.reading.y) != values.end());
+    REQUIRE(at < values.size());
+}
+
+TEST_CASE("stacked, a line's bars stay in its own band", "[bars]")
+{
+    const std::vector<double> values = walk(200000);
+    Figure figure;
+    figure.setSize(800.0, 600.0);
+    (void)figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
+    (void)figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
+    FigureSettings settings = figure.settings();
+    settings.bars = true;
+    settings.stacked = true;
+    figure.setSettings(settings);
+    const Scene scene = figure.scene();
+    REQUIRE(scene.lines.size() == 2);
+    const auto span = [](const DrawnLine& line) {
+        REQUIRE_FALSE(line.bars.empty());
+        double top = std::numeric_limits<double>::infinity();
+        double bottom = -top;
+        for (const Point& corner : line.bars) {
+            top = std::min(top, corner.y());
+            bottom = std::max(bottom, corner.y());
+        }
+        return std::pair{top, bottom};
+    };
+    const auto [firstTop, firstBottom] = span(scene.lines[0]);
+    const auto [secondTop, secondBottom] = span(scene.lines[1]);
+    // One above the other, with no row of the pane drawn on by both.
+    REQUIRE((firstBottom <= secondTop || secondBottom <= firstTop));
+}
+
+TEST_CASE("a column grid is the same columns however a pan rounds", "[bars]")
+{
+    const std::optional<ColumnGrid> grid = columnGridFor(1000.0, 2000.0, false, 10.0, 800.0);
+    REQUIRE(grid.has_value());
+    REQUIRE(grid->count == 800);
+
+    SECTION("a window a column along is the grid a column along")
+    {
+        const double column = grid->perColumn;
+        const std::optional<ColumnGrid> along =
+            columnGridFor(1000.0 + 3.0 * column, 2000.0 + 3.0 * column, false, 10.0, 800.0);
+        REQUIRE(along.has_value());
+        REQUIRE(along->sameColumns(*grid));
+        REQUIRE(along->first == grid->first + 3);
+    }
+    SECTION("a span that differs only in its last bits is the same columns")
+    {
+        const std::optional<ColumnGrid> rounded =
+            columnGridFor(1000.0, std::nextafter(2000.0, 3000.0), false, 10.0, 800.0);
+        REQUIRE(rounded.has_value());
+        REQUIRE(rounded->perColumn == grid->perColumn);
+    }
+    SECTION("each column starts where the last one ended, in ascending x")
+    {
+        for (long long k = grid->first; k < grid->first + grid->count; ++k) {
+            REQUIRE(grid->edge(k + 1) > grid->edge(k));
+        }
+    }
+    SECTION("a zoom is other columns")
+    {
+        const std::optional<ColumnGrid> closer = columnGridFor(1000.0, 1800.0, false, 10.0, 800.0);
+        REQUIRE(closer.has_value());
+        REQUIRE_FALSE(closer->sameColumns(*grid));
+    }
+}
+
+TEST_CASE("a logarithmic column grid is fixed in the logarithm", "[bars]")
+{
+    const std::optional<ColumnGrid> grid = columnGridFor(10.0, 1000.0, true, 10.0, 200.0);
+    REQUIRE(grid.has_value());
+    REQUIRE(grid->perColumn == Approx(0.01).epsilon(1e-5));
+    REQUIRE(grid->edge(grid->first) == Approx(10.0).epsilon(1e-3));
+    // A pan on such an axis multiplies the window, which moves the same columns.
+    const std::optional<ColumnGrid> along = columnGridFor(100.0, 10000.0, true, 10.0, 200.0);
+    REQUIRE(along.has_value());
+    REQUIRE(along->sameColumns(*grid));
+    REQUIRE(along->first - grid->first == std::llround(1.0 / grid->perColumn));
+    REQUIRE_FALSE(columnGridFor(-1.0, 10.0, true, 10.0, 200.0).has_value());
+}
+
+TEST_CASE("no window is no grid", "[bars]")
+{
+    REQUIRE_FALSE(columnGridFor(5.0, 5.0, false, 10.0, 200.0).has_value());
+    REQUIRE_FALSE(columnGridFor(0.0, 1.0, false, 10.0, 0.0).has_value());
+    REQUIRE_FALSE(columnGridFor(1e300, 1e300 + 1e285, false, 10.0, 200.0).has_value());
+}

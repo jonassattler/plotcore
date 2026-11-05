@@ -186,6 +186,25 @@ def test_a_view_written_down_reads_back():
         figure.restore("not a view")
 
 
+def test_a_dense_line_can_be_drawn_as_a_bar_a_column():
+    with plotcore.Figure() as figure:
+        figure.add_line(np.arange(200_000) % 977, "dense")
+        assert figure.scene().lines[0].bars.shape == (0, 2)
+        figure.settings["bars"] = True
+        assert figure.settings["bars"]
+        scene = figure.scene()
+        line = scene.lines[0]
+        assert line.runs == [] and len(line.triangles) == 0
+        assert len(line.bars) == 2 * int(np.ceil(scene.area.width))
+        assert line.bar_values.shape == line.bars.shape
+        # Against each other, a pixel wide, so nothing is blended twice.
+        np.testing.assert_array_equal(line.bars[1::2, 0] - line.bars[0::2, 0], 1.0)
+        np.testing.assert_array_equal(line.bars[2::2, 0], line.bars[1:-1:2, 0])
+        # A host that does not paint them is handed the stroke.
+        plain = figure.scene(forms=plotcore.FORM_RUNS | plotcore.FORM_VALUES).lines[0]
+        assert len(plain.bars) == 0 and len(plain.runs) > 0
+
+
 def test_a_scene_outlives_its_figure_and_holds_numpy():
     figure = figure_of(np.arange(5000.0))
     scene = figure.scene()

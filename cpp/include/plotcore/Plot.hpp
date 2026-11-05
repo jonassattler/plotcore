@@ -131,6 +131,11 @@ public:
     [[nodiscard]] PlotLine drawLine(int line) const override;
     /// The x axis that line is drawn against.
     [[nodiscard]] PlotAxis drawAxis(int line) const override;
+    /// The line on the columns of `grid`, out of its pyramid. Columns already
+    /// folded on the same grid are kept, so a pan folds only what it uncovers.
+    [[nodiscard]] DrawnColumns drawColumns(int line, const ColumnGrid& grid) const override;
+    /// How many columns have been folded, for the tests to hold that to.
+    [[nodiscard]] long long columnsFolded() const { return columnsFolded_; }
 
 private:
     struct Line;
@@ -160,6 +165,7 @@ private:
     bool viewSet_ = false;
     bool xLog_ = false;
     mutable long long wholeLineWalks_ = 0;
+    mutable long long columnsFolded_ = 0;
 };
 
 } // namespace plotcore

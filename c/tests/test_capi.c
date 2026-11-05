@@ -203,6 +203,36 @@ static void contract(void)
     CHECK(plotcore_scene_line_run(scene, 1, 0) == NULL);
     CHECK(plotcore_scene_line_strip_length(scene, 1, 0) == 600);
     plotcore_scene_free(scene);
+
+    /* Bars take the place of a dense line's stroke, for a host that asks. */
+    CHECK(plotcore_set_bool(figure, "bars", 1) == PLOTCORE_OK);
+    int32_t barsOn = 0;
+    CHECK(plotcore_get_bool(figure, "bars", &barsOn) == PLOTCORE_OK && barsOn == 1);
+    scene = plotcore_scene_new(figure);
+    int64_t barred = -1;
+    for (int64_t i = 0; i < plotcore_scene_line_count(scene); ++i) {
+        if (plotcore_scene_line_bar_count(scene, i) > 0) {
+            barred = i;
+        }
+    }
+    CHECK(barred >= 0);
+    CHECK(plotcore_scene_line(scene, barred, &info) == PLOTCORE_OK);
+    CHECK(info.run_count == 0 && info.triangle_points == 0);
+    CHECK(plotcore_scene_line_bars(scene, barred) != NULL);
+    CHECK(plotcore_scene_line_bar_values(scene, barred) != NULL);
+    plotcore_scene_free(scene);
+    request.forms = PLOTCORE_FORM_RUNS;
+    scene = plotcore_scene_request_new(figure, &request);
+    CHECK(plotcore_scene_line_bar_count(scene, barred) == 0);
+    CHECK(plotcore_scene_line_run_length(scene, barred, 0) > 0);
+    plotcore_scene_free(scene);
+    request.forms = PLOTCORE_FORM_BARS;
+    scene = plotcore_scene_request_new(figure, &request);
+    CHECK(plotcore_scene_line_bar_count(scene, barred) > 0);
+    CHECK(plotcore_scene_line_bar_values(scene, barred) == NULL);
+    plotcore_scene_free(scene);
+    CHECK(plotcore_set_bool(figure, "bars", 0) == PLOTCORE_OK);
+
     request.forms = PLOTCORE_FORM_ALL;
     request.picture = 1;
     request.width = 1200;
@@ -409,6 +439,22 @@ static void digest(Out* out, plotcore_scene* scene, int index)
             points, (long long)info.triangle_points, (long long)info.marker_count, sx, sy);
         put(out, "window " G " " G " %d %d %d " G " " G "\n", info.y_low, info.y_high, info.y_log,
             info.own, info.numbered, vx, vy);
+        const int64_t bars = plotcore_scene_line_bar_count(scene, i);
+        if (bars > 0) {
+            const double* corners = plotcore_scene_line_bars(scene, i);
+            const double* corners_values = plotcore_scene_line_bar_values(scene, i);
+            double bx = 0;
+            double by = 0;
+            double bu = 0;
+            double bv = 0;
+            for (int64_t k = 0; k < 2 * bars; ++k) {
+                bx += corners[2 * k];
+                by += corners[2 * k + 1];
+                bu += corners_values[2 * k];
+                bv += corners_values[2 * k + 1];
+            }
+            put(out, "bars %lld " G " " G " " G " " G "\n", (long long)bars, bx, by, bu, bv);
+        }
     }
     marks(out, "under", scene, plotcore_scene_under_count(scene), plotcore_scene_under);
     marks(out, "over", scene, plotcore_scene_over_count(scene), plotcore_scene_over);

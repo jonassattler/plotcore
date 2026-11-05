@@ -43,6 +43,8 @@ struct plotcore_scene
         std::vector<std::vector<double>> strips;
         std::vector<double> triangles;
         std::vector<double> markers;
+        std::vector<double> bars;
+        std::vector<double> barValues;
     };
     std::vector<Line> lines;
 };
@@ -195,6 +197,7 @@ const Field<bool FigureSettings::*> kBools[] = {
     {"bandReadout", &FigureSettings::bandReadout},
     {"paneMessage", &FigureSettings::paneMessage},
     {"lineGestures", &FigureSettings::lineGestures},
+    {"bars", &FigureSettings::bars},
 };
 
 const Field<double FigureSettings::*> kNumbers[] = {
@@ -1298,6 +1301,8 @@ plotcore_scene* snapshot(plotcore_figure* figure, const SceneRequest& request)
             }
             flattened.triangles = flat(line.triangles);
             flattened.markers = flat(line.markers);
+            flattened.bars = flat(line.bars);
+            flattened.barValues = flat(line.barValues);
             out->lines.push_back(std::move(flattened));
         }
         return out.release();
@@ -1329,6 +1334,7 @@ plotcore_scene* plotcore_scene_request_new(plotcore_figure* figure,
     asked.geometry.triangles = (request->forms & PLOTCORE_FORM_TRIANGLES) != 0;
     asked.geometry.strips = (request->forms & PLOTCORE_FORM_STRIPS) != 0;
     asked.geometry.values = (request->forms & PLOTCORE_FORM_VALUES) != 0;
+    asked.geometry.bars = (request->forms & PLOTCORE_FORM_BARS) != 0;
     asked.picture = request->picture != 0;
     asked.width = request->width;
     asked.height = request->height;
@@ -1509,6 +1515,28 @@ const double* plotcore_scene_line_markers(const plotcore_scene* scene, int64_t i
 {
     return hasDrawn(scene, index) ? scene->lines[static_cast<std::size_t>(index)].markers.data()
                                   : nullptr;
+}
+
+int64_t plotcore_scene_line_bar_count(const plotcore_scene* scene, int64_t index)
+{
+    return hasDrawn(scene, index)
+               ? static_cast<int64_t>(scene->lines[static_cast<std::size_t>(index)].bars.size() / 4)
+               : 0;
+}
+
+const double* plotcore_scene_line_bars(const plotcore_scene* scene, int64_t index)
+{
+    return hasDrawn(scene, index) ? scene->lines[static_cast<std::size_t>(index)].bars.data()
+                                  : nullptr;
+}
+
+const double* plotcore_scene_line_bar_values(const plotcore_scene* scene, int64_t index)
+{
+    if (!hasDrawn(scene, index)) {
+        return nullptr;
+    }
+    const std::vector<double>& values = scene->lines[static_cast<std::size_t>(index)].barValues;
+    return values.empty() ? nullptr : values.data();
 }
 
 int64_t plotcore_scene_under_count(const plotcore_scene* scene)

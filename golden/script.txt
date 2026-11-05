@@ -153,3 +153,32 @@ line walk 1000000 999 tight
 scene
 view 4000 4100 -100 100
 scene
+
+# --- drawn as bars --------------------------------------------------------------
+clear
+budget 0
+set_bool bars 1
+line walk 300000 4242 dense
+scene
+wheel 300 250 120 none
+scene
+press 400 250 left none
+move 427 250 none
+release 427 250 left none
+scene
+line holes 100000 5000 with holes
+scene
+view 1000 1100 -20 40
+scene
+reset
+size 800 500 2
+scene
+set_bool flipped 1
+scene
+set_bool flipped 0
+set_bool yLog 1
+scene
+set_bool yLog 0
+size 800 500 1
+set_bool bars 0
+scene

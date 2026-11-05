@@ -128,7 +128,10 @@ enum
     PLOTCORE_FORM_TRIANGLES = 2,
     PLOTCORE_FORM_STRIPS = 4,
     PLOTCORE_FORM_VALUES = 8,
-    PLOTCORE_FORM_ALL = 15
+    /* A host that paints plotcore_scene_line_bars asks for this. One that does
+     * not is handed the stroke, whatever the setting `bars` says. */
+    PLOTCORE_FORM_BARS = 16,
+    PLOTCORE_FORM_ALL = 31
 };
 
 typedef enum plotcore_appetite
@@ -383,7 +386,7 @@ PLOTCORE_API int64_t plotcore_held_bytes(const plotcore_figure* figure);
 /*
  * The plot as a whole:
  *   bool    xLog yLog flipped minorNumbers markers cursor readout bandReadout
- *           paneMessage lineGestures legend bundle dark paper stacked
+ *           paneMessage lineGestures legend bundle dark paper stacked bars
  *           colours.reversed colours.custom
  *   number  gridStepX gridStepY xLogBase yLogBase highlighted colours.from
  *           colours.to
@@ -551,6 +554,19 @@ PLOTCORE_API int64_t plotcore_scene_line_strip_length(const plotcore_scene* scen
 PLOTCORE_API const double* plotcore_scene_line_strip(const plotcore_scene* scene, int64_t index,
                                                      int64_t run);
 PLOTCORE_API const double* plotcore_scene_line_markers(const plotcore_scene* scene, int64_t index);
+/* The line as bars, when the setting `bars` is on and it is dense enough: one a
+ * device column from the column's smallest value to its largest, in place of
+ * its runs, triangles and strips. Two x, y corners a bar, top left and then
+ * bottom right, to fill in the line's colour. Across a column they are on device
+ * pixels and along it they carry a fraction of one, so a host fills them
+ * antialiased; they do not overlap. A line too sparse for them has none and is
+ * stroked as usual, so a host paints both forms. */
+PLOTCORE_API int64_t plotcore_scene_line_bar_count(const plotcore_scene* scene, int64_t index);
+PLOTCORE_API const double* plotcore_scene_line_bars(const plotcore_scene* scene, int64_t index);
+/* The same corners in the data's own units, when the scene was asked for
+ * PLOTCORE_FORM_VALUES as well. For a host whose axes are its own. */
+PLOTCORE_API const double* plotcore_scene_line_bar_values(const plotcore_scene* scene,
+                                                          int64_t index);
 
 /* What is painted under the lines, and over them, each in the order it is
  * painted: the ground first, then `under`, the lines clipped to the pane, and

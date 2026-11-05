@@ -64,7 +64,8 @@ FORM_RUNS = 1
 FORM_TRIANGLES = 2
 FORM_STRIPS = 4
 FORM_VALUES = 8
-FORM_ALL = 15
+FORM_BARS = 16
+FORM_ALL = 31
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,12 @@ class Chrome:
 @dataclass
 class Line:
     """One drawn line. Points are pane pixels with y down; `values` are the
-    same points in the data's own units, for a host whose axes are its own."""
+    same points in the data's own units, for a host whose axes are its own.
+
+    `bars` is the line as one bar a device column, when the setting `bars` is on
+    and the line is dense enough, and it then has no runs, strips or triangles:
+    two corners a bar, its top left and its bottom right, to fill antialiased in
+    the line's colour. `bar_values` is the same corners in the data's units."""
 
     line: int
     colour: Colour
@@ -101,6 +107,8 @@ class Line:
     strips: List[np.ndarray]
     triangles: np.ndarray
     markers: np.ndarray
+    bars: np.ndarray
+    bar_values: np.ndarray
     y_low: float
     y_high: float
     y_log: bool
@@ -294,6 +302,7 @@ def copy_scene(handle) -> Scene:
             strip = lib.plotcore_scene_line_strip_length(handle, index, run)
             if strip:
                 strips.append(_points(lib.plotcore_scene_line_strip(handle, index, run), strip))
+        bars = lib.plotcore_scene_line_bar_count(handle, index)
         scene.lines.append(
             Line(
                 line=info.line,
@@ -307,6 +316,8 @@ def copy_scene(handle) -> Scene:
                                   info.triangle_points),
                 markers=_points(lib.plotcore_scene_line_markers(handle, index),
                                 info.marker_count),
+                bars=_points(lib.plotcore_scene_line_bars(handle, index), 2 * bars),
+                bar_values=_points(lib.plotcore_scene_line_bar_values(handle, index), 2 * bars),
                 y_low=info.y_low,
                 y_high=info.y_high,
                 y_log=bool(info.y_log),

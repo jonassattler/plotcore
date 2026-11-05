@@ -27,6 +27,7 @@
 // does not move when a line before it is left out. See series().
 
 #include "plotcore/Camera.hpp"
+#include "plotcore/Levels.hpp"
 #include "plotcore/Projection.hpp"
 
 #include <string>
@@ -42,6 +43,17 @@ struct LineExtent
     double maximum = 0.0;
     bool positive = false;
     double positiveMinimum = 0.0;
+};
+
+/// A line folded onto the columns of a grid: each column's smallest and largest
+/// value, the stroke out of it included, or NaN for both where the column holds
+/// nothing finite or lies past either end of the line. `count` of each, the
+/// source's, on the terms of LineSource::drawLine.
+struct DrawnColumns
+{
+    const double* lows = nullptr;
+    const double* highs = nullptr;
+    int count = 0;
 };
 
 class LineSource
@@ -98,6 +110,19 @@ public:
     [[nodiscard]] virtual PlotLine drawLine(int line) const = 0;
     /// The x axis that line is drawn against, on the same terms.
     [[nodiscard]] virtual PlotAxis drawAxis(int line) const = 0;
+    /// The line on the columns of `grid`, for FigureSettings::bars -- or nothing,
+    /// and the figure then strokes it as usual, when a column inside the line
+    /// holds no element or would have to be cut finer than what is held.
+    ///
+    /// A question and not news: it may be asked for a picture's grid as well as
+    /// the pane's, and must read nothing to answer. A source with no way of
+    /// answering it says nothing, which is every source until it chooses to.
+    [[nodiscard]] virtual DrawnColumns drawColumns(int line, const ColumnGrid& grid) const
+    {
+        (void)line;
+        (void)grid;
+        return {};
+    }
 };
 
 } // namespace plotcore

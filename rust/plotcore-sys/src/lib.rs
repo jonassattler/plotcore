@@ -56,7 +56,8 @@ pub const PLOTCORE_FORM_RUNS: i32 = 1;
 pub const PLOTCORE_FORM_TRIANGLES: i32 = 2;
 pub const PLOTCORE_FORM_STRIPS: i32 = 4;
 pub const PLOTCORE_FORM_VALUES: i32 = 8;
-pub const PLOTCORE_FORM_ALL: i32 = 15;
+pub const PLOTCORE_FORM_BARS: i32 = 16;
+pub const PLOTCORE_FORM_ALL: i32 = 31;
 
 pub type plotcore_appetite = c_int;
 pub const PLOTCORE_APPETITE_LOW: plotcore_appetite = 0;
@@ -570,6 +571,12 @@ unsafe extern "C" {
         scene: *const plotcore_scene,
         index: i64,
         run: i64,
+    ) -> *const c_double;
+    pub fn plotcore_scene_line_bar_count(scene: *const plotcore_scene, index: i64) -> i64;
+    pub fn plotcore_scene_line_bars(scene: *const plotcore_scene, index: i64) -> *const c_double;
+    pub fn plotcore_scene_line_bar_values(
+        scene: *const plotcore_scene,
+        index: i64,
     ) -> *const c_double;
     pub fn plotcore_scene_under_count(scene: *const plotcore_scene) -> i64;
     pub fn plotcore_scene_under(

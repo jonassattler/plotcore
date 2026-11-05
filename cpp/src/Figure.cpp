@@ -802,6 +802,87 @@ Scene Figure::scene(const SceneRequest& request)
     return composed;
 }
 
+bool Figure::barsOf(int index, const PlotLine& line, const PlotView& view,
+                    std::vector<Point>& corners) const
+{
+    const double ratio = std::max(view.pixelRatio, 1.0);
+    const double measured = view.width * ratio;
+    // A bar costs what a column of stroke costs, four vertices, but a stroke
+    // can be shared out and a bar cannot: at ten thousand lines a line's share
+    // is fifty columns, and a bar twenty pixels wide is a block.
+    if (view.maxColumns > 0 && std::ceil(measured) > view.maxColumns) {
+        return false;
+    }
+    const std::optional<ColumnGrid> grid =
+        columnGridFor(view.xMin, view.xMax, view.xLog, view.xLogBase, measured);
+    const AxisMapping yMap = yMappingOf(view);
+    if (!grid.has_value() || !yMap.usable) {
+        return false;
+    }
+    const LineSource& lines = source();
+    const DrawnColumns folded = lines.drawColumns(index, *grid);
+    if (folded.lows == nullptr || folded.highs == nullptr || folded.count != grid->count) {
+        return false;
+    }
+
+    // Where each column's extremes are, down the pane, or NaN for no bar. On a
+    // logarithmic axis a value at or below zero has no place, and a column's
+    // smallest may be one with values above it that a fold does not name; the
+    // bar is then only what the fold can place, its largest, rather than a
+    // bar down to the edge of the pane that nothing in the data reaches.
+    const auto columns = static_cast<std::size_t>(folded.count);
+    const double nothing = std::numeric_limits<double>::quiet_NaN();
+    const double h = view.height;
+    std::vector<double> tops(columns, nothing);
+    std::vector<double> bottoms(columns, nothing);
+    for (std::size_t c = 0; c < columns; ++c) {
+        const double high = folded.highs[c];
+        if (!yMap.draws(high)) {
+            continue;
+        }
+        const double low = yMap.draws(folded.lows[c]) ? folded.lows[c] : high;
+        tops[c] = h - yMap.fractionOf(high) * h;
+        bottoms[c] = h - yMap.fractionOf(low) * h;
+    }
+
+    // A stroke wider than a device column is drawn by widening what each column
+    // holds, not by drawing wider bars: a steep stretch would otherwise be one
+    // device pixel wide beside a flat stretch of two, and bars that overlapped
+    // would blend twice at anything less than full strength.
+    const double width = std::max(line.width, kMinStrokeWidth);
+    const auto reach = std::max<long long>(std::llround(width * ratio), 1);
+    const auto ahead = (reach - 1) / 2;
+    const auto behind = reach - 1 - ahead;
+    const double half = width / 2.0;
+    corners.reserve(2 * columns);
+    for (std::size_t c = 0; c < columns; ++c) {
+        double top = std::numeric_limits<double>::infinity();
+        double bottom = -top;
+        const auto at = static_cast<long long>(c);
+        const auto first = static_cast<std::size_t>(std::max<long long>(at - behind, 0));
+        const auto last =
+            static_cast<std::size_t>(std::min(at + ahead, static_cast<long long>(columns) - 1));
+        for (std::size_t k = first; k <= last; ++k) {
+            if (std::isfinite(tops[k]) || std::isfinite(bottoms[k])) {
+                top = std::min(top, tops[k]);
+                bottom = std::max(bottom, bottoms[k]);
+            }
+        }
+        // ...and a flat stretch is as thick as a stroke, half of it either side.
+        top -= half;
+        bottom += half;
+        // Infinite on a logarithmic axis at a value too small to place, and off
+        // the pane whenever the window has been zoomed past it. The host clips
+        // to the pane, and it need only be handed what the clip leaves.
+        if (!(bottom > 0.0) || !(top < h)) {
+            continue;
+        }
+        corners.emplace_back(static_cast<double>(c) / ratio, std::max(top, -half));
+        corners.emplace_back(static_cast<double>(c + 1) / ratio, std::min(bottom, h + half));
+    }
+    return true;
+}
+
 Scene Figure::compose(const SceneRequest& request)
 {
     const Layout lay = layout();
@@ -906,6 +987,39 @@ Scene Figure::compose(const SceneRequest& request)
         drawnLine.own = window.own;
         drawnLine.numbered = window.own && window.axis;
         const bool marks = settings_.markers && !line.summarised && !result.decimated;
+        std::vector<Point> corners;
+        const bool barred = settings_.bars && want.bars && barsOf(index, line, view, corners);
+        if (barred) {
+            drawnLine.bars.reserve(corners.size());
+            if (want.values) {
+                drawnLine.barValues.reserve(corners.size());
+            }
+            // Across a column a bar is on device pixels, which needs the pane's
+            // own edge to be: at a ratio of one and a half, a gutter of a whole
+            // logical pixel may not land on one.
+            const double ratio = std::max(view.pixelRatio, 1.0);
+            const double left = std::round(lay.area.x * ratio) / ratio;
+            const double bottom = std::round((lay.area.y + lay.area.height) * ratio) / ratio;
+            for (std::size_t c = 0; c + 1 < corners.size(); c += 2) {
+                if (want.values) {
+                    drawnLine.barValues.push_back(valueOf(corners[c]));
+                    drawnLine.barValues.push_back(valueOf(corners[c + 1]));
+                }
+                if (pane.transposed) {
+                    // The flip turns the corners over, so the bar's bottom right
+                    // comes back as what is now its top left.
+                    const Point a = transposedPoint(corners[c + 1], pane);
+                    const Point b = transposedPoint(corners[c], pane);
+                    drawnLine.bars.emplace_back(a.x() + lay.area.x, a.y() - pane.height + bottom);
+                    drawnLine.bars.emplace_back(b.x() + lay.area.x, b.y() - pane.height + bottom);
+                }
+                else {
+                    drawnLine.bars.emplace_back(corners[c].x() + left, corners[c].y() + lay.area.y);
+                    drawnLine.bars.emplace_back(corners[c + 1].x() + left,
+                                                corners[c + 1].y() + lay.area.y);
+                }
+            }
+        }
         for (const PlotRun& run : runs) {
             std::vector<Point> stroke;
             stroke.reserve(static_cast<std::size_t>(run.count));
@@ -913,7 +1027,7 @@ Scene Figure::compose(const SceneRequest& request)
                 const Point& p = points[static_cast<std::size_t>(run.first + i)];
                 stroke.emplace_back(p.x() + lay.area.x, p.y() + lay.area.y);
             }
-            if (want.triangles || want.strips) {
+            if (!barred && (want.triangles || want.strips)) {
                 std::vector<Point> strip;
                 strokeRunInto(stroke.data(), static_cast<int>(stroke.size()), line.width,
                               [&](double px, double py) { strip.emplace_back(px, py); });
@@ -927,10 +1041,10 @@ Scene Figure::compose(const SceneRequest& request)
             if (marks) {
                 drawnLine.markers.insert(drawnLine.markers.end(), stroke.begin(), stroke.end());
             }
-            if (want.runs) {
+            if (!barred && want.runs) {
                 drawnLine.runs.push_back(std::move(stroke));
             }
-            if (want.values) {
+            if (!barred && want.values) {
                 drawnLine.values.emplace_back(values.begin() + run.first,
                                               values.begin() + run.first + run.count);
             }
@@ -2061,6 +2175,7 @@ std::string Figure::state() const
         .set("bandReadout", Value::of(settings_.bandReadout))
         .set("paneMessage", Value::of(settings_.paneMessage))
         .set("lineGestures", Value::of(settings_.lineGestures))
+        .set("bars", Value::of(settings_.bars))
         .set("title", Value::of(settings_.title))
         .set("xLabel", Value::of(settings_.xLabel))
         .set("yLabel", Value::of(settings_.yLabel))
@@ -2101,6 +2216,7 @@ bool Figure::restore(const std::string& text)
     next.bandReadout = root.boolOr("bandReadout", next.bandReadout);
     next.paneMessage = root.boolOr("paneMessage", next.paneMessage);
     next.lineGestures = root.boolOr("lineGestures", next.lineGestures);
+    next.bars = root.boolOr("bars", next.bars);
     next.title = root.textOr("title", next.title);
     next.xLabel = root.textOr("xLabel", next.xLabel);
     next.yLabel = root.textOr("yLabel", next.yLabel);

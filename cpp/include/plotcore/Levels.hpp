@@ -620,4 +620,71 @@ struct LogFoldGrid
 /// because a column is a run of positions whichever way the pane reads them.
 void edgesAlong(const LogColumns& columns, double start, double step, std::vector<double>& out);
 
+// ---------------------------------------------------------------------------
+// One bar a column: the pane's device columns as a grid in x
+// ---------------------------------------------------------------------------
+//
+// An envelope handed over as a stroke is a zigzag, up to a bucket's high and
+// back down to the next one's low, and a zigzag a pixel wide does not fill what
+// it zigzags over. Held against every sample of a noisy line stroked one by
+// one, it left pale vertical slits through a band the data fills solid.
+// FigureSettings::bars draws such a line as one bar per device column instead,
+// from the smallest of the column to the largest.
+//
+// The seam is what makes that a picture of the same line and not of another.
+// A column's extremes take in the stroke out of it (see the head of this file),
+// so a bar holds the first element of the column after it, and that element is
+// in the next bar too: two neighbours always share a value and always touch,
+// and nothing has to join them. Folded without the seam, 240 of 899 neighbouring
+// bars on a fast chirp did not touch.
+//
+// The grid is for bars what alignment is for buckets (see PlotWindow). Column
+// `k` covers the same run of x whatever the reader is looking at, so a pan
+// changes which columns are on screen, a whole device pixel at a time, and
+// nothing about what is in them: the shape is the same numbers one place along,
+// and only what a pan uncovers has to be folded. A y zoom folds nothing at all.
+//
+// It is not a grid of powers of two, which is where it parts from the buckets.
+// A wheel notch is a factor of 1.25, so a column is rarely a power of two wide,
+// and merging aligned buckets into columns makes columns of one bucket alternate
+// with columns of two: on noise, bars 36% taller every other column at three
+// samples a pixel and still 11% at ninety-six. So the width comes from the zoom,
+// and extremesOver() answers a run of any width out of the pyramid already held.
+
+/// The columns of a pane, as runs of x.
+struct ColumnGrid
+{
+    /// Axis positions a column: x, or its logarithm on a logarithmic axis.
+    double perColumn = 0.0;
+    bool logarithmic = false;
+    double base = 10.0;
+    /// The grid's column at the pane's first device column.
+    long long first = 0;
+    /// Device columns the pane has.
+    int count = 0;
+
+    /// The x where column `k` starts, and the one before it ends.
+    [[nodiscard]] double edge(long long k) const;
+    /// Whether `other` is this grid moved along: the same columns, so what
+    /// has been folded for one is true of the other.
+    [[nodiscard]] bool sameColumns(const ColumnGrid& other) const
+    {
+        return perColumn == other.perColumn && logarithmic == other.logarithmic &&
+               base == other.base && count == other.count;
+    }
+    [[nodiscard]] bool operator==(const ColumnGrid&) const = default;
+};
+
+/// The grid of a pane of `columns` device columns showing `low`..`high`, or
+/// nothing when that is no window on such an axis.
+///
+/// `columns` is the pane's width as measured, not rounded: it is what says how
+/// wide a column is. The width of a column is rounded to twenty significant
+/// bits, because a window's span is the difference of two doubles and comes out
+/// a little different at each step of a pan, and two frames of one zoom have to
+/// agree exactly for their columns to be the same columns. That moves a column
+/// by less than a hundredth of a pixel across a pane of four thousand.
+[[nodiscard]] std::optional<ColumnGrid> columnGridFor(double low, double high, bool logarithmic,
+                                                      double base, double columns);
+
 } // namespace plotcore

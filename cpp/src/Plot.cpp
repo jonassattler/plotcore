@@ -4,6 +4,8 @@
 
 #include "plotcore/Plot.hpp"
 
+#include "plotcore/Parallel.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -100,8 +102,15 @@ struct Plot::Line
     mutable std::optional<Span> timeSpan;
     mutable std::optional<double> timePositive;
 
+    // The columns a line was last folded onto, kept so that a pan folds only
+    // what it uncovers. See ColumnGrid.
+    mutable std::optional<ColumnGrid> barGrid;
+    mutable std::vector<double> barLows;
+    mutable std::vector<double> barHighs;
+
     void forget() const
     {
+        barGrid.reset();
         extent.reset();
         timeSpan.reset();
         timePositive.reset();
@@ -629,6 +638,127 @@ PlotLine Plot::drawLine(int line) const
         drawn.positions = held.summaryAt.data();
     }
     drawn.summarised = held.stride > 1;
+    return drawn;
+}
+
+DrawnColumns Plot::drawColumns(int line, const ColumnGrid& grid) const
+{
+    const Line& held = at(line);
+    if (!held.finished || held.pyramid.empty() || grid.count <= 0) {
+        return {};
+    }
+    const std::vector<double>* time = timeOf(held);
+    bool ascending = true;
+    long long count = held.length;
+    if (time != nullptr) {
+        // A time base that doubles back has no column a run of elements could
+        // be: the samples of one pixel are from all over the line.
+        if (!(time == &held.time ? held.timeSorted : timeSorted_)) {
+            return {};
+        }
+        ascending = time == &held.time ? held.timeAscending : timeAscending_;
+        count = std::min<long long>(held.length, static_cast<long long>(time->size()));
+    }
+    // The element an edge falls before. Each element is in exactly one column,
+    // whichever way the line runs along x: a line running right to left has
+    // its elements in descending order across the columns, and the same run of
+    // them lies between two edges.
+    const auto elementAt = [&](long long k) {
+        const double x = grid.edge(k);
+        if (time != nullptr) {
+            return before(*time, count, ascending, x);
+        }
+        const double position = std::ceil((x - indexStart_) / indexStep_);
+        return static_cast<long long>(std::clamp(position, 0.0, static_cast<double>(count)));
+    };
+
+    // What is kept, moved to where this grid wants it, and the run of columns
+    // that is left to fold.
+    int from = 0;
+    int to = grid.count;
+    if (held.barGrid.has_value() && held.barGrid->sameColumns(grid)) {
+        const long long along = grid.first - held.barGrid->first;
+        const auto kept = static_cast<long long>(grid.count) - std::abs(along);
+        if (kept > 0) {
+            const auto move = [&](std::vector<double>& values) {
+                if (along > 0) {
+                    std::copy(values.begin() + along, values.end(), values.begin());
+                }
+                else if (along < 0) {
+                    std::copy_backward(values.begin(), values.end() + along, values.end());
+                }
+            };
+            move(held.barLows);
+            move(held.barHighs);
+            from = along > 0 ? static_cast<int>(kept) : 0;
+            to = along > 0 ? grid.count : static_cast<int>(-along);
+        }
+    }
+    held.barGrid.reset();
+    held.barLows.resize(static_cast<std::size_t>(grid.count));
+    held.barHighs.resize(static_cast<std::size_t>(grid.count));
+
+    // Asked of every column before any is folded, because one that cannot be
+    // drawn means a stroke and not a bar. A column with no element inside the
+    // line has nothing to draw and a stroke crossing it: that is every column
+    // under a sample a pixel, the sparse end of a logarithmic axis, and a
+    // pause in a time base. One narrower than a base bucket would come out as
+    // that bucket, wider than itself, and its neighbours would too.
+    const long long base = held.pyramid.baseBucket();
+    const auto fresh = static_cast<std::size_t>(to - from);
+    std::vector<long long> edges(fresh + 1);
+    for (std::size_t i = 0; i <= fresh; ++i) {
+        edges[i] = elementAt(grid.first + from + static_cast<long long>(i));
+    }
+    for (std::size_t i = 0; i < fresh; ++i) {
+        const long long first = std::min(edges[i], edges[i + 1]);
+        const long long last = std::max(edges[i], edges[i + 1]);
+        if (first > 0 && last < count && last - first < base) {
+            return {};
+        }
+    }
+
+    const auto foldOf = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i) {
+            const long long first = std::min(edges[i], edges[i + 1]);
+            const long long last = std::max(edges[i], edges[i + 1]);
+            const auto column = static_cast<std::size_t>(from) + i;
+            double low = std::numeric_limits<double>::quiet_NaN();
+            double high = low;
+            if (first < last) {
+                const Extremes found = extremesOver(held.pyramid, first, last);
+                if (found.found()) {
+                    low = found.lowest;
+                    high = found.highest;
+                }
+            }
+            held.barLows[column] = low;
+            held.barHighs[column] = high;
+        }
+    };
+    // Over the pool when a zoom has to fold a whole pane of them, which on one
+    // thread is a sizeable part of a frame once there are a few dozen lines. A
+    // pan folds a column or two, and is not worth waking anything for.
+    constexpr std::size_t kAlone = 256;
+    if (fresh < kAlone) {
+        foldOf(0, fresh);
+    }
+    else {
+        const long long pieces =
+            std::min<long long>(poolThreads(), static_cast<long long>(fresh / (kAlone / 2)));
+        parallelFor(pieces, [&](long long piece) {
+            const auto at = static_cast<std::size_t>(piece);
+            const auto of = static_cast<std::size_t>(pieces);
+            foldOf(fresh * at / of, fresh * (at + 1) / of);
+        });
+    }
+    columnsFolded_ += static_cast<long long>(fresh);
+    held.barGrid = grid;
+
+    DrawnColumns drawn;
+    drawn.lows = held.barLows.data();
+    drawn.highs = held.barHighs.data();
+    drawn.count = grid.count;
     return drawn;
 }
 

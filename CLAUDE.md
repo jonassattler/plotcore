@@ -195,6 +195,24 @@ answered:
   Nothing is borrowed across it, every failure is a status with
   `plotcore_last_error()` beside it, and `test_capi.c` is compiled as C.
 
+**Bars** (`FigureSettings::bars`, off until a host turns it on) draw a line as
+one rectangle per device column, from the column's smallest value to its
+largest, in `DrawnLine::bars` and in place of its stroke. A stroke's zigzag
+leaves slits in a dense band that the data fills; a bar does not, and the seam
+is what makes two neighbours always touch with nothing joining them. Columns
+are a `ColumnGrid` fixed in x (`Levels.hpp` argues it), so a bar moves a whole
+device pixel at a time, a pan folds only what it uncovers (`Plot::drawColumns`)
+and a y zoom folds nothing. A line **falls back to its stroke** wherever a bar
+would be untrue or unaffordable: a column inside the line with no element
+(under a sample a pixel, the sparse end of a log x, a pause in a time base), a
+column finer than the base, a time base that doubles back, a line's share of
+`kMaxVertices` under a column a pixel, a host that did not ask for `FORM_BARS`,
+and a source that does not answer `LineSource::drawColumns`, which is every
+source but `Plot` today, the viewer's included. So a line has runs or bars and
+a host paints both. It is on or off for now; choosing between the two along a
+line, by how tall its bars are, is the likely next step, and one line holding
+both forms is already what a host paints.
+
 `golden/` is what holds the three languages to one plot: a script of
 settings and gestures, and the digest of every scene it asks for. `test_capi`
 writes it (`--write`) and checks it; the Python and Rust tests check the same

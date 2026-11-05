@@ -694,4 +694,42 @@ void ZoomFocus::set(double atX, double factor)
     active = true;
 }
 
+double ColumnGrid::edge(long long k) const
+{
+    const double at = static_cast<double>(k) * perColumn;
+    return logarithmic ? std::pow(base, at) : at;
+}
+
+std::optional<ColumnGrid> columnGridFor(double low, double high, bool logarithmic, double base,
+                                        double columns)
+{
+    if (!std::isfinite(columns) || !(columns >= 1.0)) {
+        return std::nullopt;
+    }
+    const AxisMapping map = mappingOver(low, high, logarithmic, base);
+    if (!map.usable) {
+        return std::nullopt;
+    }
+    const double width = (map.high - map.low) / columns;
+    if (!std::isfinite(width) || !(width > 0.0)) {
+        return std::nullopt;
+    }
+    int exponent = 0;
+    const double fraction = std::frexp(width, &exponent);
+    constexpr double kKept = 1 << 20;
+    ColumnGrid grid;
+    grid.perColumn = std::ldexp(std::round(fraction * kKept) / kKept, exponent);
+    grid.logarithmic = logarithmic;
+    grid.base = base;
+    // Past 2^53 a double no longer counts columns one at a time, and two
+    // neighbours would be the same column.
+    const double first = map.low / grid.perColumn;
+    if (!std::isfinite(first) || std::abs(first) > 9007199254740992.0) {
+        return std::nullopt;
+    }
+    grid.first = std::llround(first);
+    grid.count = static_cast<int>(std::min(std::ceil(columns), 1e9));
+    return grid;
+}
+
 } // namespace plotcore

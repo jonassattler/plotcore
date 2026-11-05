@@ -218,6 +218,11 @@ struct FigureSettings
     bool paper = false;
     /// Every drawn line in an equal band of the pane.
     bool stacked = false;
+    /// A line drawn as one bar per device column, from the smallest value of
+    /// the column to the largest, wherever it is dense enough to be: every
+    /// column holds an element and the line's share of the vertex budget
+    /// reaches a column a pixel. See ColumnGrid, and DrawnLine::bars.
+    bool bars = false;
 };
 
 /// What a reader chooses about one line.
@@ -350,6 +355,17 @@ struct DrawnLine
     /// ...and as one triangle strip a run, two points a sample: the same
     /// triangles at a third of the points, for a host that draws strips.
     std::vector<std::vector<Point>> strips;
+    /// The line as bars, when FigureSettings::bars is on, the host asked for
+    /// them and the line is dense enough: two corners a bar, its top left and
+    /// its bottom right, filled in the line's colour. They are on device pixels
+    /// across a column and carry a fraction of one along it, so a host fills
+    /// them antialiased and each end of a bar covers what it should; and they
+    /// do not overlap, so a line drawn at part strength stays one strength.
+    /// A line drawn as bars has no runs, triangles or strips.
+    std::vector<Point> bars;
+    /// ...and the same corners in the data's own units, for the host `values`
+    /// is for.
+    std::vector<Point> barValues;
     /// Where a marker goes, when markers are on and the line is its samples.
     std::vector<Point> markers;
     double markerRadius = 2.0;
@@ -492,6 +508,9 @@ struct SceneOptions
     bool triangles = true;
     bool strips = false;
     bool values = true;
+    /// Whether this host paints DrawnLine::bars. One that does not is handed
+    /// the stroke, whatever FigureSettings::bars says.
+    bool bars = true;
 };
 
 /// A sample to draw the crosshair on, named rather than pointed at: the line,
@@ -513,7 +532,10 @@ struct PinnedSample
 /// width, nothing for a source to fold or read on the picture's account --
 /// and is drawn from what they hold for the pane. Nobody is pointing at a
 /// picture and nobody is dragging across it: it has no band, and a reading
-/// only when one is pinned.
+/// only when one is pinned. Bars are the one thing that is folded again for it,
+/// because a bar is a pixel wide and a picture has pixels of its own; that is a
+/// question of what is already held (LineSource::drawColumns), and it reads
+/// nothing.
 struct SceneRequest
 {
     SceneOptions geometry;
@@ -654,6 +676,10 @@ private:
     [[nodiscard]] PlotView paneView(const Layout& layout) const;
     [[nodiscard]] Scene compose(const SceneRequest& request);
     /// The numbers a band being drawn writes beside itself (PlotBand.qml).
+    /// `line` as bars in `view`, as the corners of each with x and y as they
+    /// are before a flip, or false when it is to be stroked.
+    [[nodiscard]] bool barsOf(int index, const PlotLine& line, const PlotView& view,
+                              std::vector<Point>& corners) const;
     void bandReadout(Scene& scene, const Layout& layout) const;
     /// `text` cut to `width` in `role`'s face, with an ellipsis at its end
     /// or, `middle`, in its middle -- as Qt elides a Text.

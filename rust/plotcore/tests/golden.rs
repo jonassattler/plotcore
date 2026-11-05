@@ -210,6 +210,18 @@ fn digest(scene: &Scene, index: usize, out: &mut Vec<String>) {
             g(vx),
             g(vy)
         ));
+        if !line.bars.is_empty() {
+            let sum =
+                |points: &[[f64; 2]], axis: usize| -> f64 { points.iter().map(|p| p[axis]).sum() };
+            out.push(format!(
+                "bars {} {} {} {} {}",
+                line.bars.len() / 2,
+                g(sum(&line.bars, 0)),
+                g(sum(&line.bars, 1)),
+                g(sum(&line.bar_values, 0)),
+                g(sum(&line.bar_values, 1))
+            ));
+        }
     }
     marks(out, "under", &scene.under);
     marks(out, "over", &scene.over);

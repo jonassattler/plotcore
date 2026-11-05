@@ -127,6 +127,10 @@ def digest(scene: plotcore.Scene, index: int) -> List[str]:
                      f" {len(line.markers)} {_g(sx)} {_g(sy)}")
         out.append(f"window {_g(line.y_low)} {_g(line.y_high)} {int(line.y_log)} {int(line.own)}"
                    f" {int(line.numbered)} {_g(vx)} {_g(vy)}")
+        if len(line.bars):
+            bx, by = line.bars.sum(axis=0).tolist()
+            bu, bv = line.bar_values.sum(axis=0).tolist()
+            out.append(f"bars {len(line.bars) // 2} {_g(bx)} {_g(by)} {_g(bu)} {_g(bv)}")
     for what, marks in (("under", scene.under), ("over", scene.over)):
         _marks(out, what, marks)
     for e in scene.legend:

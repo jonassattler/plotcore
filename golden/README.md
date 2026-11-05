@@ -77,6 +77,7 @@ relative 1e-9, everything after a `|` character for character.
     message |TEXT
     line INDEX R G B A WIDTH RUNS POINTS TRIANGLE_POINTS MARKERS SUM_X SUM_Y
     window Y_LOW Y_HIGH Y_LOG OWN NUMBERED SUM_VALUE_X SUM_VALUE_Y
+    bars COUNT SUM_X SUM_Y SUM_VALUE_X SUM_VALUE_Y
     WHERE segments LAYER COUNT SUM_X SUM_Y SUM_WIDTH
     WHERE box LAYER CLIPPED DASHED X0 Y0 X1 Y1 FILL_RGBA STROKE_RGBA WIDTH RADIUS
     WHERE circle LAYER CLIPPED X Y RADIUS FILL_RGBA STROKE_RGBA WIDTH
@@ -95,5 +96,6 @@ line of its own, in the order it is painted.
 
 `SUM_X` and `SUM_Y` add up every run point's coordinates (or both ends of every
 segment) in order, and `SUM_VALUE_X` and `SUM_VALUE_Y` the same points in the
-data's own units. A legend appears only when it has entries, and its rect
-only then.
+data's own units. A `bars` line follows a line's `window` only when the line is
+drawn as bars, and adds up both corners of each. A legend appears only when it
+has entries, and its rect only then.

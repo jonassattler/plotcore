@@ -27,6 +27,7 @@ from . import _native
 from .figure import Button, Error, Figure, Line, Modifiers
 from .scene import (
     FORM_ALL,
+    FORM_BARS,
     FORM_RUNS,
     FORM_STRIPS,
     FORM_TRIANGLES,
@@ -44,6 +45,7 @@ from .scene import (
 
 __all__ = [
     "FORM_ALL",
+    "FORM_BARS",
     "FORM_RUNS",
     "FORM_STRIPS",
     "FORM_TRIANGLES",

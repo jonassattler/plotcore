@@ -333,6 +333,12 @@ pub struct DrawnLine {
     /// ...and as one triangle strip a run, two points a sample, when asked for.
     pub strips: Vec<Vec<[f64; 2]>>,
     pub markers: Vec<[f64; 2]>,
+    /// The line as one bar a device column, when the setting `bars` is on and
+    /// it is dense enough, in place of its runs, strips and triangles: two
+    /// corners a bar, top left and then bottom right, to fill in its colour.
+    pub bars: Vec<[f64; 2]>,
+    /// ...and the same corners in the data's own units.
+    pub bar_values: Vec<[f64; 2]>,
     pub y_low: f64,
     pub y_high: f64,
     pub y_log: bool,
@@ -433,6 +439,7 @@ pub const FORM_RUNS: i32 = sys::PLOTCORE_FORM_RUNS;
 pub const FORM_TRIANGLES: i32 = sys::PLOTCORE_FORM_TRIANGLES;
 pub const FORM_STRIPS: i32 = sys::PLOTCORE_FORM_STRIPS;
 pub const FORM_VALUES: i32 = sys::PLOTCORE_FORM_VALUES;
+pub const FORM_BARS: i32 = sys::PLOTCORE_FORM_BARS;
 pub const FORM_ALL: i32 = sys::PLOTCORE_FORM_ALL;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -602,6 +609,14 @@ unsafe fn copy_scene(scene: *const sys::plotcore_scene) -> Scene {
                     info.triangle_points,
                 ),
                 markers: points(sys::plotcore_scene_line_markers(scene, index), info.marker_count),
+                bars: points(
+                    sys::plotcore_scene_line_bars(scene, index),
+                    2 * sys::plotcore_scene_line_bar_count(scene, index),
+                ),
+                bar_values: points(
+                    sys::plotcore_scene_line_bar_values(scene, index),
+                    2 * sys::plotcore_scene_line_bar_count(scene, index),
+                ),
                 ..DrawnLine::default()
             };
             for run in 0..info.run_count {
