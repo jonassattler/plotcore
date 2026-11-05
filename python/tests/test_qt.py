@@ -75,8 +75,10 @@ def test_bars_fill_what_a_stroke_leaves_slits_in(qapp):
             return sum(1 for c in inks if c.name() != ink)
 
         assert pale_columns() > 0, "or this data does not show what bars are for"
-        figure.settings["bars"] = True
+        figure.settings["drawing"] = "bars"
         assert pale_columns() == 0
+        figure.settings["drawing"] = "adaptive"
+        assert pale_columns() == 0, "dense noise is bars when each form is chosen, too"
 
 
 def test_the_widget_hands_the_figure_its_wheel_and_its_drag(qapp):

@@ -1729,7 +1729,7 @@ struct Barred
         figure.setSize(800.0, 400.0, ratio);
         line = figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
         FigureSettings settings = figure.settings();
-        settings.bars = true;
+        settings.drawing = LineDrawing::Bars;
         figure.setSettings(settings);
         (void)figure.scene();
     }
@@ -1967,7 +1967,7 @@ TEST_CASE("a window finer than a line is held at is stroked", "[bars]")
     const long long base = figure.plot().baseBucket(line);
     REQUIRE(base > 1);
     FigureSettings settings = figure.settings();
-    settings.bars = true;
+    settings.drawing = LineDrawing::Bars;
     figure.setSettings(settings);
     (void)figure.scene();
     const double y0 = figure.camera().viewMinY();
@@ -2013,7 +2013,7 @@ TEST_CASE("a time base decides what a column holds", "[bars]")
         (void)other.plot().addLine(mirrored.data(), static_cast<long long>(mirrored.size()));
         other.plot().setTime(reversed.data(), static_cast<long long>(reversed.size()));
         FigureSettings settings = other.settings();
-        settings.bars = true;
+        settings.drawing = LineDrawing::Bars;
         other.setSettings(settings);
         const Scene scene = other.scene();
         REQUIRE(scene.lines[0].bars.size() == forward.size());
@@ -2118,7 +2118,7 @@ TEST_CASE("past a line's share of the vertices a line is stroked", "[bars]")
     Figure figure;
     figure.setSize(800.0, 400.0);
     FigureSettings settings = figure.settings();
-    settings.bars = true;
+    settings.drawing = LineDrawing::Bars;
     figure.setSettings(settings);
     // A share of about five hundred columns, on a pane of over seven hundred.
     for (int i = 0; i < 1000; ++i) {
@@ -2177,7 +2177,7 @@ TEST_CASE("a source that does not fold columns is stroked", "[bars]")
     figure.setSize(800.0, 400.0);
     figure.setSource(&source);
     FigureSettings settings = figure.settings();
-    settings.bars = true;
+    settings.drawing = LineDrawing::Bars;
     figure.setSettings(settings);
     const Scene scene = figure.scene();
     REQUIRE(scene.lines[0].bars.empty());
@@ -2207,14 +2207,14 @@ TEST_CASE("bars are written in a view and read back", "[bars]")
     const std::vector<double> values = walk(100000);
     Barred barred(values);
     const std::string state = barred.figure.state();
-    REQUIRE(state.find("\"bars\":true") != std::string::npos);
+    REQUIRE(state.find("\"drawing\":\"bars\"") != std::string::npos);
 
     Figure other;
     other.setSize(800.0, 400.0);
     (void)other.plot().addLine(values.data(), static_cast<long long>(values.size()));
-    REQUIRE_FALSE(other.settings().bars);
+    REQUIRE(other.settings().drawing == LineDrawing::Stroke);
     REQUIRE(other.restore(state));
-    REQUIRE(other.settings().bars);
+    REQUIRE(other.settings().drawing == LineDrawing::Bars);
     REQUIRE_FALSE(other.scene().lines[0].bars.empty());
 }
 
@@ -2316,7 +2316,7 @@ TEST_CASE("stacked, a line's bars stay in its own band", "[bars]")
     (void)figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
     (void)figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
     FigureSettings settings = figure.settings();
-    settings.bars = true;
+    settings.drawing = LineDrawing::Bars;
     settings.stacked = true;
     figure.setSettings(settings);
     const Scene scene = figure.scene();
@@ -2392,4 +2392,841 @@ TEST_CASE("no window is no grid", "[bars]")
     REQUIRE_FALSE(columnGridFor(5.0, 5.0, false, 10.0, 200.0).has_value());
     REQUIRE_FALSE(columnGridFor(0.0, 1.0, false, 10.0, 0.0).has_value());
     REQUIRE_FALSE(columnGridFor(1e300, 1e300 + 1e285, false, 10.0, 200.0).has_value());
+}
+
+// --- adaptive: which columns are bars -----------------------------------------------------
+
+namespace {
+
+constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+
+/// What filledColumns() says of columns all `height` tall, each starting `slope`
+/// pixels further down the pane than the last.
+std::vector<unsigned char> filledOf(double height, double slope, std::size_t count = 40)
+{
+    std::vector<double> tops(count);
+    std::vector<double> bottoms(count);
+    for (std::size_t c = 0; c < count; ++c) {
+        tops[c] = 100.0 + slope * static_cast<double>(c);
+        bottoms[c] = tops[c] + height;
+    }
+    std::vector<unsigned char> filled;
+    filledColumns(tops, bottoms, {}, {}, 1.0, filled);
+    return filled;
+}
+
+std::size_t countOf(const std::vector<unsigned char>& columns)
+{
+    return static_cast<std::size_t>(std::count(columns.begin(), columns.end(), 1));
+}
+
+/// A stream the same on every machine, for data that must not be tuned to.
+class Noise
+{
+public:
+    explicit Noise(unsigned seed) : state_(seed) {}
+    double operator()()
+    {
+        state_ = state_ * 1103515245u + 12345u;
+        return static_cast<double>((state_ >> 16) & 0x7fff) / 32767.0 - 0.5;
+    }
+
+private:
+    unsigned state_;
+};
+
+std::vector<double> noisy(std::size_t count, double amplitude, unsigned seed = 7)
+{
+    Noise noise(seed);
+    std::vector<double> values(count);
+    for (double& value : values) {
+        value = amplitude * noise();
+    }
+    return values;
+}
+
+/// Level either side of a burst of noise: a line with both forms in it.
+std::vector<double> burst(std::size_t count, std::size_t from, std::size_t to)
+{
+    std::vector<double> values = noisy(count, 2.0);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i < from || i >= to) {
+            values[i] = std::sin(static_cast<double>(i) * 2e-5);
+        }
+    }
+    return values;
+}
+
+struct Adaptive
+{
+    Figure figure;
+
+    explicit Adaptive(const std::vector<double>& values, double width = 800.0, double ratio = 1.0)
+    {
+        figure.setSize(width, 400.0, ratio);
+        (void)figure.plot().addLine(values.data(), static_cast<long long>(values.size()));
+        FigureSettings settings = figure.settings();
+        settings.drawing = LineDrawing::Adaptive;
+        settings.cursor = false;
+        settings.legend = false;
+        figure.setSettings(settings);
+    }
+};
+
+/// The pane columns that are bars, from where the bars are.
+std::vector<long long> barColumns(const Scene& scene)
+{
+    std::vector<long long> columns;
+    const std::vector<Point>& bars = scene.lines[0].bars;
+    for (std::size_t c = 0; c < bars.size(); c += 2) {
+        columns.push_back(std::llround(bars[c].x() - scene.area.x));
+    }
+    return columns;
+}
+
+/// Whether `point` lies inside any bar of `line`.
+bool insideABar(const DrawnLine& line, const Point& point)
+{
+    for (std::size_t c = 0; c + 1 < line.bars.size(); c += 2) {
+        if (point.x() >= line.bars[c].x() && point.x() <= line.bars[c + 1].x() &&
+            point.y() >= line.bars[c].y() && point.y() <= line.bars[c + 1].y()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("a column with a body in common with its neighbours is filled", "[adaptive]")
+{
+    SECTION("dense noise: about one height, nearly all of it shared")
+    {
+        REQUIRE(countOf(filledOf(60.0, 0.5)) == 40);
+    }
+    SECTION("a noisy line running steeply: the noise is what is shared")
+    {
+        REQUIRE(countOf(filledOf(40.0, 30.0)) == 40);
+    }
+    SECTION("a clean steep line: the neighbours only touch")
+    {
+        REQUIRE(countOf(filledOf(30.0, 30.0)) == 0);
+    }
+    SECTION("a level line with a little noise on it: under three strokes in common")
+    {
+        REQUIRE(countOf(filledOf(2.5, 0.0)) == 0);
+    }
+}
+
+TEST_CASE("a tall column beside a short one is not filled, however much it overlaps", "[adaptive]")
+{
+    // A spike every column and a half: tall, tall, short. Every short one lies
+    // wholly inside its tall neighbour, and is a stripe all the same.
+    const std::size_t count = 60;
+    std::vector<double> tops(count);
+    std::vector<double> bottoms(count);
+    for (std::size_t c = 0; c < count; ++c) {
+        const bool tall = c % 3 != 2;
+        tops[c] = tall ? 100.0 : 350.0;
+        bottoms[c] = 400.0;
+    }
+    std::vector<unsigned char> filled;
+    filledColumns(tops, bottoms, {}, {}, 1.0, filled);
+    // The first has one neighbour to be judged by, and it is another tall one.
+    // Everything else has a short one beside it.
+    for (std::size_t c = 1; c < count; ++c) {
+        REQUIRE(filled[c] == 0);
+    }
+}
+
+TEST_CASE("a gap in the data is no neighbour, and a column too thin to draw is", "[adaptive]")
+{
+    std::vector<double> tops(21, 100.0);
+    std::vector<double> bottoms(21, 200.0);
+    tops[10] = kNaN;
+    bottoms[10] = kNaN;
+    std::vector<unsigned char> filled;
+
+    SECTION("a band ending at a hole is a band up to its edge")
+    {
+        filledColumns(tops, bottoms, {}, {}, 1.0, filled);
+        REQUIRE(filled[9] == 1);
+        REQUIRE(filled[10] == 0);
+        REQUIRE(filled[11] == 1);
+    }
+    SECTION("beside a column that holds too little, the line goes on as a stroke")
+    {
+        std::vector<unsigned char> kinds(21, kColumnWhole);
+        kinds[10] = kColumnThin;
+        filledColumns(tops, bottoms, kinds, {}, 1.0, filled);
+        REQUIRE(filled[8] == 1);
+        REQUIRE(filled[9] == 0);
+        REQUIRE(filled[10] == 0);
+        REQUIRE(filled[11] == 0);
+        REQUIRE(filled[12] == 1);
+    }
+    SECTION("a line ending a few elements into a column does not end the band early")
+    {
+        std::vector<double> top(21, 100.0);
+        std::vector<double> bottom(21, 200.0);
+        // Two elements' worth, beside columns of hundreds.
+        top[20] = 150.0;
+        bottom[20] = 151.0;
+        std::vector<unsigned char> kinds(21, kColumnWhole);
+        filledColumns(top, bottom, kinds, {}, 1.0, filled);
+        REQUIRE(filled[19] == 0);
+        kinds[20] = kColumnCut;
+        filledColumns(top, bottom, kinds, {}, 1.0, filled);
+        REQUIRE(filled[19] == 1);
+        REQUIRE(filled[20] == 1);
+    }
+    SECTION("a column with no neighbours at all is not a band")
+    {
+        const std::vector<double> oneTop = {kNaN, 100.0, kNaN};
+        const std::vector<double> oneBottom = {kNaN, 200.0, kNaN};
+        filledColumns(oneTop, oneBottom, {}, {}, 1.0, filled);
+        REQUIRE(countOf(filled) == 0);
+    }
+}
+
+TEST_CASE("a column keeps its answer until it is clearly the other", "[adaptive]")
+{
+    const auto answered = [](double common, unsigned char was) {
+        const std::vector<double> tops = {100.0, 100.0, 100.0};
+        const std::vector<double> bottoms = {100.0 + common, 100.0 + common, 100.0 + common};
+        const std::vector<unsigned char> prior = {was, was, was};
+        std::vector<unsigned char> filled;
+        filledColumns(tops, bottoms, {}, prior, 1.0, filled);
+        return filled[1];
+    };
+    // Over the bar to enter, under it to leave, and between them each stays.
+    REQUIRE(answered(kBarEnterOverlap + 0.1, 0) == 1);
+    REQUIRE(answered(kBarLeaveOverlap - 0.1, 1) == 0);
+    const double between = (kBarEnterOverlap + kBarLeaveOverlap) / 2.0;
+    REQUIRE(answered(between, 0) == 0);
+    REQUIRE(answered(between, 1) == 1);
+}
+
+TEST_CASE("an answer fed back to itself does not change, so a still view cannot creep",
+          "[adaptive]")
+{
+    Noise noise(3);
+    std::vector<double> tops(4000);
+    std::vector<double> bottoms(4000);
+    for (std::size_t c = 0; c < tops.size(); ++c) {
+        tops[c] = 100.0 + 40.0 * noise();
+        // Heights from nothing to two hundred, so plenty land either side of
+        // every bar and between the pairs of them.
+        const double spread = std::abs(noise());
+        bottoms[c] = tops[c] + 800.0 * spread * spread;
+    }
+    std::vector<unsigned char> first;
+    filledColumns(tops, bottoms, {}, {}, 1.0, first);
+    REQUIRE(countOf(first) > 0);
+    REQUIRE(countOf(first) < first.size());
+    std::vector<unsigned char> second;
+    filledColumns(tops, bottoms, {}, first, 1.0, second);
+    std::vector<unsigned char> third;
+    filledColumns(tops, bottoms, {}, second, 1.0, third);
+    // Once: a column that passed the lower bars only because it was filled had
+    // to pass the higher ones to be filled, so the first feedback changes nothing.
+    REQUIRE(second == first);
+    REQUIRE(third == second);
+}
+
+TEST_CASE("stretches are held to a shortest length and a narrowest gap", "[adaptive]")
+{
+    const ColumnRule rule{16, 8};
+    const auto of = [&](const std::string& pattern) {
+        std::vector<unsigned char> filled;
+        for (const char c : pattern) {
+            filled.push_back(c == '#' ? 1 : 0);
+        }
+        std::vector<unsigned char> dense;
+        denseStretches(filled, {}, rule, dense);
+        return countOf(dense);
+    };
+    const std::string run(40, '#');
+    const std::string none(40, '.');
+
+    SECTION("a spike's few columns in a band stay in the band")
+    {
+        REQUIRE(of(none + run + "..." + run + none) == 83);
+    }
+    SECTION("a gap too wide is left a gap")
+    {
+        REQUIRE(of(none + run + std::string(9, '.') + run + none) == 80);
+    }
+    SECTION("a burst too short to be a band is dropped")
+    {
+        REQUIRE(of(none + std::string(15, '#') + none) == 0);
+        REQUIRE(of(none + std::string(16, '#') + none) == 16);
+    }
+    SECTION("a comb of short runs is not bridged back into a band")
+    {
+        std::string comb;
+        for (int i = 0; i < 40; ++i) {
+            comb += "##...";
+        }
+        REQUIRE(of(none + comb + none) == 0);
+    }
+    SECTION("what dropping a burst leaves between two stretches is filled")
+    {
+        // Each gap is wider than the burst beside it, so neither is filled
+        // first, and the burst goes: which leaves one gap of twelve -- too wide
+        // -- or, here, of seven, which is not.
+        REQUIRE(of(none + run + "..#.." + run + none) == 85);
+    }
+    SECTION("no gap with a column too thin to draw in it is filled")
+    {
+        std::string pattern = none + run + "..." + run + none;
+        std::vector<unsigned char> filled;
+        std::vector<unsigned char> kinds(pattern.size(), kColumnWhole);
+        for (std::size_t c = 0; c < pattern.size(); ++c) {
+            filled.push_back(pattern[c] == '#' ? 1 : 0);
+        }
+        kinds[81] = kColumnThin;
+        std::vector<unsigned char> dense;
+        denseStretches(filled, kinds, rule, dense);
+        REQUIRE(countOf(dense) == 80);
+    }
+}
+
+TEST_CASE("whatever the columns do, no stretch or gap comes out shorter than its limit",
+          "[adaptive]")
+{
+    const ColumnRule rule{16, 8};
+    Noise noise(11);
+    std::vector<unsigned char> filled(20000);
+    // Runs of every length, so every rule is reached.
+    std::size_t c = 0;
+    while (c < filled.size()) {
+        const auto length =
+            static_cast<std::size_t>(1.0 + 40.0 * std::abs(noise()) * std::abs(noise()) * 4.0);
+        const unsigned char value = noise() > 0.0 ? 1 : 0;
+        for (std::size_t k = 0; k < length && c < filled.size(); ++k, ++c) {
+            filled[c] = value;
+        }
+    }
+    std::vector<unsigned char> dense;
+    denseStretches(filled, {}, rule, dense);
+    REQUIRE(countOf(dense) > 0);
+    std::size_t at = 0;
+    bool first = true;
+    while (at < dense.size()) {
+        std::size_t end = at;
+        while (end < dense.size() && dense[end] == dense[at]) {
+            ++end;
+        }
+        // Either end of the columns is the only place a run may be cut short.
+        if (at > 0 && end < dense.size()) {
+            if (dense[at] != 0) {
+                REQUIRE(end - at >= static_cast<std::size_t>(rule.run));
+            }
+            else {
+                REQUIRE(end - at > static_cast<std::size_t>(rule.gap));
+            }
+        }
+        at = end;
+        first = false;
+    }
+    REQUIRE_FALSE(first);
+}
+
+TEST_CASE("where the pane stands decides nothing about any column in it", "[adaptive]")
+{
+    // The pane's edge is not an edge of anything: cut the columns anywhere, as a
+    // pan does, and what is in the pane comes out as it did from the whole.
+    const ColumnRule rule = columnRuleFor(1.0);
+    const auto margin = static_cast<std::size_t>(rule.margin());
+    Noise noise(23);
+    std::vector<unsigned char> filled(6000);
+    std::size_t c = 0;
+    while (c < filled.size()) {
+        const auto length =
+            static_cast<std::size_t>(1.0 + 160.0 * std::abs(noise()) * std::abs(noise()));
+        const unsigned char value = noise() > -0.1 ? 1 : 0;
+        for (std::size_t k = 0; k < length && c < filled.size(); ++k, ++c) {
+            filled[c] = value;
+        }
+    }
+    std::vector<unsigned char> whole;
+    denseStretches(filled, {}, rule, whole);
+    const std::size_t pane = 800;
+    for (std::size_t from = margin; from + pane + margin < filled.size(); from += 37) {
+        const auto begin = filled.begin() + static_cast<std::ptrdiff_t>(from - margin);
+        const auto end = filled.begin() + static_cast<std::ptrdiff_t>(from + pane + margin);
+        const std::vector<unsigned char> seen(begin, end);
+        std::vector<unsigned char> part;
+        denseStretches(seen, {}, rule, part);
+        for (std::size_t k = 0; k < pane; ++k) {
+            REQUIRE(part[margin + k] == whole[from + k]);
+        }
+    }
+}
+
+TEST_CASE("a zoom's answers carry over to the same place on the axis", "[adaptive]")
+{
+    const std::optional<ColumnGrid> before = columnGridFor(0.0, 1000.0, false, 10.0, 100.0);
+    const std::optional<ColumnGrid> after = columnGridFor(100.0, 300.0, false, 10.0, 100.0);
+    REQUIRE(before.has_value());
+    REQUIRE(after.has_value());
+    std::vector<unsigned char> answers(100, 0);
+    for (std::size_t c = 20; c < 25; ++c) {
+        answers[c] = 1; // x from 200 to 250
+    }
+    std::vector<unsigned char> out;
+    carriedColumns(*before, answers, *after, out);
+    for (std::size_t c = 0; c < out.size(); ++c) {
+        const double middle = 100.0 + (static_cast<double>(c) + 0.5) * 2.0;
+        REQUIRE((out[c] != 0) == (middle >= 200.0 && middle < 250.0));
+    }
+    // Past what was held there is nothing to remember, and across scales nothing
+    // that compares.
+    const std::optional<ColumnGrid> away = columnGridFor(5000.0, 6000.0, false, 10.0, 100.0);
+    carriedColumns(*before, answers, *away, out);
+    REQUIRE(countOf(out) == 0);
+    const std::optional<ColumnGrid> logarithmic = columnGridFor(1.0, 1000.0, true, 10.0, 100.0);
+    carriedColumns(*before, answers, *logarithmic, out);
+    REQUIRE(countOf(out) == 0);
+}
+
+// --- adaptive: a figure --------------------------------------------------------------------
+
+TEST_CASE("a line is drawn as it is asked to be, and a view says which", "[adaptive]")
+{
+    for (const LineDrawing drawing :
+         {LineDrawing::Stroke, LineDrawing::Bars, LineDrawing::Adaptive}) {
+        LineDrawing back = LineDrawing::Stroke;
+        REQUIRE(drawingOf(drawingName(drawing), back));
+        REQUIRE(back == drawing);
+    }
+    LineDrawing untouched = LineDrawing::Bars;
+    REQUIRE_FALSE(drawingOf("plaid", untouched));
+    REQUIRE(untouched == LineDrawing::Bars);
+
+    const std::vector<double> values = burst(200000, 80000, 120000);
+    Adaptive adaptive(values);
+    const std::string state = adaptive.figure.state();
+    REQUIRE(state.find("\"drawing\":\"adaptive\"") != std::string::npos);
+    Figure other;
+    (void)other.plot().addLine(values.data(), static_cast<long long>(values.size()));
+    REQUIRE(other.restore(state));
+    REQUIRE(other.settings().drawing == LineDrawing::Adaptive);
+}
+
+TEST_CASE("a smooth line with a noisy middle is a stroke, then bars, then a stroke", "[adaptive]")
+{
+    const std::vector<double> values = burst(400000, 150000, 250000);
+    Adaptive adaptive(values);
+    const Scene scene = adaptive.figure.scene();
+    const DrawnLine& line = scene.lines[0];
+    REQUIRE(line.runs.size() == 2);
+    REQUIRE_FALSE(line.bars.empty());
+
+    // The bars are where the noise is, to within the column a seam can reach.
+    const double perPixel = 400000.0 / scene.area.width;
+    const std::vector<long long> columns = barColumns(scene);
+    REQUIRE(static_cast<double>(columns.front()) == Approx(150000.0 / perPixel).margin(2.0));
+    REQUIRE(static_cast<double>(columns.back()) == Approx(250000.0 / perPixel).margin(2.0));
+    // ...in one stretch, with nothing missing from it.
+    REQUIRE(columns.back() - columns.front() + 1 == static_cast<long long>(columns.size()));
+}
+
+TEST_CASE("where the two forms meet, the stroke ends inside the bar", "[adaptive]")
+{
+    // A stroke stopping at the bar's edge could stop above or below it, which is
+    // a gap in the line. Running on to an element of the bar's column, which the
+    // bar holds, it cannot.
+    const std::vector<double> values = burst(400000, 150000, 250000);
+    const auto check = [](const Scene& scene) {
+        const DrawnLine& line = scene.lines[0];
+        REQUIRE(line.runs.size() == 2);
+        REQUIRE(insideABar(line, line.runs[0].back()));
+        REQUIRE(insideABar(line, line.runs[1].front()));
+        // And the strokes' other ends do not reach into the bars at all.
+        REQUIRE_FALSE(insideABar(line, line.runs[0].front()));
+        REQUIRE_FALSE(insideABar(line, line.runs[1].back()));
+    };
+    SECTION("upright")
+    {
+        Adaptive adaptive(values);
+        check(adaptive.figure.scene());
+    }
+    SECTION("on a display of two")
+    {
+        Adaptive adaptive(values, 800.0, 2.0);
+        check(adaptive.figure.scene());
+    }
+    SECTION("at a ratio that puts the gutter between two device pixels")
+    {
+        Adaptive adaptive(values, 800.0, 1.5);
+        check(adaptive.figure.scene());
+    }
+    SECTION("flipped")
+    {
+        Adaptive adaptive(values);
+        FigureSettings settings = adaptive.figure.settings();
+        settings.flipped = true;
+        adaptive.figure.setSettings(settings);
+        check(adaptive.figure.scene());
+    }
+}
+
+TEST_CASE("no stroke is drawn under a stretch of bars", "[adaptive]")
+{
+    const std::vector<double> values = burst(400000, 150000, 250000);
+    Adaptive adaptive(values);
+    const Scene scene = adaptive.figure.scene();
+    const DrawnLine& line = scene.lines[0];
+    const double from = line.bars.front().x();
+    const double to = line.bars.back().x();
+    for (const std::vector<Point>& run : line.runs) {
+        for (std::size_t i = 1; i + 1 < run.size(); ++i) {
+            REQUIRE_FALSE((run[i].x() > from && run[i].x() < to));
+        }
+    }
+}
+
+TEST_CASE("a pan changes no column's answer and moves both forms rigidly", "[adaptive]")
+{
+    const std::vector<double> values = burst(800000, 300000, 500000);
+    Adaptive adaptive(values);
+    Figure& figure = adaptive.figure;
+    (void)figure.scene();
+    const double y0 = figure.camera().viewMinY();
+    const double y1 = figure.camera().viewMaxY();
+    figure.setViewRange(200000.0, 400000.0, y0, y1);
+    const Scene first = figure.scene();
+    const auto paneColumns = static_cast<double>(std::ceil(first.area.width));
+    const double width = figure.camera().viewMaxX() - figure.camera().viewMinX();
+    const std::optional<ColumnGrid> grid = columnGridFor(
+        figure.camera().viewMinX(), figure.camera().viewMaxX(), false, 10.0, first.area.width);
+    REQUIRE(grid.has_value());
+    const double column = grid->perColumn;
+    const double start = figure.camera().viewMinX();
+    (void)paneColumns;
+
+    // The border enters the pane from the right as this goes on, so a column's
+    // answer is asked at the pane's edge and again well inside it.
+    const auto barsAt = [&](int step) {
+        const double at = start + step * column;
+        figure.setViewRange(at, at + width, y0, y1);
+        return figure.scene();
+    };
+    const long long foldedBefore = figure.plot().columnsFolded();
+    const Scene origin = barsAt(0);
+    const long long foldedAtOrigin = figure.plot().columnsFolded();
+    std::vector<long long> before = barColumns(origin);
+    std::vector<Point> stroke =
+        origin.lines[0].runs.empty() ? std::vector<Point>{} : origin.lines[0].runs[0];
+    (void)foldedBefore;
+    for (int step = 1; step <= 300; ++step) {
+        const Scene scene = barsAt(step);
+        const std::vector<long long> now = barColumns(scene);
+        // Every column on screen in both frames gave the same answer.
+        for (const long long c : before) {
+            const long long moved = c - 1;
+            if (moved >= 0) {
+                REQUIRE(std::binary_search(now.begin(), now.end(), moved));
+            }
+        }
+        for (const long long c : now) {
+            const long long back = c + 1;
+            if (back < static_cast<long long>(scene.area.width) - 1) {
+                REQUIRE(std::binary_search(before.begin(), before.end(), back));
+            }
+        }
+        before = now;
+    }
+    // One new column a frame, past the far side of the margin and no others.
+    REQUIRE(figure.plot().columnsFolded() - foldedAtOrigin == 300);
+    REQUIRE_FALSE(before.empty());
+}
+
+TEST_CASE("the stroke moves with the bars, a whole device pixel at a time", "[adaptive]")
+{
+    const std::vector<double> values = burst(800000, 300000, 500000);
+    Adaptive adaptive(values);
+    Figure& figure = adaptive.figure;
+    (void)figure.scene();
+    const double y0 = figure.camera().viewMinY();
+    const double y1 = figure.camera().viewMaxY();
+    figure.setViewRange(100000.0, 400000.0, y0, y1);
+    const Scene first = figure.scene();
+    const double width = figure.camera().viewMaxX() - figure.camera().viewMinX();
+    const std::optional<ColumnGrid> grid =
+        columnGridFor(100000.0, 100000.0 + width, false, 10.0, first.area.width);
+    REQUIRE(grid.has_value());
+    const double column = grid->perColumn;
+    const double onGrid = static_cast<double>(grid->first) * column;
+
+    figure.setViewRange(onGrid, onGrid + width, y0, y1);
+    const Scene placed = figure.scene();
+    REQUIRE_FALSE(placed.lines[0].runs.empty());
+    const std::vector<Point> run = placed.lines[0].runs[0];
+
+    SECTION("a fraction of a column moves nothing")
+    {
+        figure.setViewRange(onGrid + 0.2 * column, onGrid + 0.2 * column + width, y0, y1);
+        const Scene nudged = figure.scene();
+        REQUIRE(nudged.lines[0].runs[0].size() == run.size());
+        for (std::size_t i = 0; i < run.size(); ++i) {
+            REQUIRE(nudged.lines[0].runs[0][i].x() == Approx(run[i].x()).margin(1e-6));
+            REQUIRE(nudged.lines[0].runs[0][i].y() == run[i].y());
+        }
+    }
+    SECTION("three columns move it three pixels")
+    {
+        figure.setViewRange(onGrid + 3.0 * column, onGrid + 3.0 * column + width, y0, y1);
+        const Scene moved = figure.scene();
+        const std::vector<Point>& now = moved.lines[0].runs[0];
+        // The same points, by what they are, however many are off the end.
+        for (std::size_t i = 10; i + 10 < run.size(); ++i) {
+            const auto found = std::find_if(now.begin(), now.end(), [&](const Point& p) {
+                return std::abs(p.x() - (run[i].x() - 3.0)) < 1e-6 && p.y() == run[i].y();
+            });
+            REQUIRE(found != now.end());
+        }
+    }
+}
+
+TEST_CASE("going back and forth over a threshold settles rather than flickering", "[adaptive]")
+{
+    // Noise a little over what it takes to be bars, at the zoom this starts from,
+    // so that a y zoom out takes it under and a zoom in brings it back.
+    const std::vector<double> values = noisy(400000, 2.0);
+    Adaptive adaptive(values);
+    Figure& figure = adaptive.figure;
+    (void)figure.scene();
+    const double x0 = figure.camera().viewMinX();
+    const double x1 = figure.camera().viewMaxX();
+
+    SECTION("a y zoom")
+    {
+        // Half the noise's height in stroke widths is the bar to leave by, and
+        // between the bars it stays what it was. So find a window in between.
+        double span = 400.0;
+        Scene scene;
+        figure.setViewRange(x0, x1, -span, span);
+        for (; span > 0.1; span /= 1.1) {
+            figure.setViewRange(x0, x1, -span, span);
+            scene = figure.scene();
+            if (!scene.lines[0].bars.empty()) {
+                break;
+            }
+        }
+        REQUIRE_FALSE(scene.lines[0].bars.empty());
+        const std::size_t bars = scene.lines[0].bars.size();
+        // A few percent either way, back and forth: nothing changes.
+        for (int i = 0; i < 20; ++i) {
+            const double wobble = i % 2 == 0 ? span * 1.04 : span;
+            figure.setViewRange(x0, x1, -wobble, wobble);
+            REQUIRE(figure.scene().lines[0].bars.size() == bars);
+        }
+    }
+    SECTION("a zoom along x")
+    {
+        const auto wheel = [&](double delta) {
+            figure.wheel(400.0, 200.0, delta, Modifiers{});
+            return figure.scene();
+        };
+        (void)wheel(120.0);
+        const std::vector<long long> settledIn = barColumns(wheel(0.0));
+        (void)wheel(-120.0);
+        const std::vector<long long> settledOut = barColumns(wheel(0.0));
+        for (int i = 0; i < 10; ++i) {
+            (void)wheel(120.0);
+            REQUIRE(barColumns(wheel(0.0)) == settledIn);
+            (void)wheel(-120.0);
+            REQUIRE(barColumns(wheel(0.0)) == settledOut);
+        }
+    }
+    SECTION("no wobble at all: a still view stays exactly as it is")
+    {
+        const std::vector<Point> bars = figure.scene().lines[0].bars;
+        for (int i = 0; i < 5; ++i) {
+            REQUIRE(figure.scene().lines[0].bars == bars);
+        }
+    }
+}
+
+TEST_CASE("each signal gets the form that suits it", "[adaptive]")
+{
+    SECTION("dense noise fills the pane")
+    {
+        const std::vector<double> values = noisy(400000, 2.0);
+        Adaptive adaptive(values);
+        const Scene scene = adaptive.figure.scene();
+        REQUIRE(scene.lines[0].runs.empty());
+        REQUIRE_FALSE(scene.lines[0].bars.empty());
+    }
+    SECTION("a clean curve is a stroke from end to end")
+    {
+        std::vector<double> values(400000);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values[i] = std::sin(static_cast<double>(i) * 1e-4);
+        }
+        Adaptive adaptive(values);
+        const Scene scene = adaptive.figure.scene();
+        REQUIRE(scene.lines[0].bars.empty());
+        REQUIRE(scene.lines[0].runs.size() == 1);
+    }
+    SECTION("a spike every column and a half is not a band of stripes")
+    {
+        // What the demo's random walk is, at about 1.6 columns a spike.
+        std::vector<double> values(1000000, 0.0);
+        Noise noise(5);
+        double at = 0.0;
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            at += noise();
+            values[i] = i % 997 == 996 ? at + 500.0 : at;
+        }
+        Adaptive adaptive(values, 1628.0);
+        const Scene scene = adaptive.figure.scene();
+        REQUIRE(scene.lines[0].bars.empty());
+    }
+    SECTION("under a sample a column there is nothing to fill")
+    {
+        const std::vector<double> values = noisy(800, 2.0);
+        Adaptive adaptive(values);
+        const Scene scene = adaptive.figure.scene();
+        REQUIRE(scene.lines[0].bars.empty());
+        REQUIRE(scene.lines[0].runs.size() == 1);
+    }
+}
+
+TEST_CASE("a logarithmic x axis is a stroke where it is sparse and bars where it is not",
+          "[adaptive]")
+{
+    const std::vector<double> values = noisy(2000000, 2.0);
+    Adaptive adaptive(values);
+    FigureSettings settings = adaptive.figure.settings();
+    settings.xLog = true;
+    adaptive.figure.setSettings(settings);
+    const Scene scene = adaptive.figure.scene();
+    const DrawnLine& line = scene.lines[0];
+    REQUIRE_FALSE(line.bars.empty());
+    REQUIRE_FALSE(line.runs.empty());
+    // The first decades are a few elements a column, so the bars start late, and
+    // reach the pane's right edge.
+    const double first = line.bars.front().x() - scene.area.x;
+    REQUIRE(first > scene.area.width / 4.0);
+    REQUIRE(line.bars.back().x() >= scene.area.x + scene.area.width - 2.0);
+    // ...and the stroke comes up to them.
+    REQUIRE(insideABar(line, line.runs.back().back()));
+}
+
+TEST_CASE("a hole in a band is a hole, with no stroke across it", "[adaptive]")
+{
+    std::vector<double> values = noisy(400000, 2.0);
+    for (std::size_t i = 150000; i < 170000; ++i) {
+        values[i] = kNaN;
+    }
+    Adaptive adaptive(values);
+    const Scene scene = adaptive.figure.scene();
+    const double perPixel = 400000.0 / scene.area.width;
+    const double from = scene.area.x + 150000.0 / perPixel + 2.0;
+    const double to = scene.area.x + 170000.0 / perPixel - 2.0;
+    const DrawnLine& line = scene.lines[0];
+    for (std::size_t c = 0; c < line.bars.size(); c += 2) {
+        REQUIRE_FALSE((line.bars[c].x() >= from && line.bars[c].x() < to));
+    }
+    for (const std::vector<Point>& run : line.runs) {
+        for (const Point& point : run) {
+            REQUIRE_FALSE((point.x() >= from && point.x() < to));
+        }
+    }
+}
+
+TEST_CASE("wherever adaptive cannot use bars, it is the stroke itself", "[adaptive]")
+{
+    const std::vector<double> values = burst(400000, 150000, 250000);
+    Adaptive adaptive(values);
+    Figure plain;
+    plain.setSize(800.0, 400.0);
+    (void)plain.plot().addLine(values.data(), static_cast<long long>(values.size()));
+    FigureSettings settings = plain.settings();
+    settings.cursor = false;
+    settings.legend = false;
+    plain.setSettings(settings);
+    const Scene stroke = plain.scene();
+
+    SECTION("for a host that does not paint them")
+    {
+        SceneRequest request;
+        request.geometry.bars = false;
+        const Scene scene = adaptive.figure.scene(request);
+        REQUIRE(scene.lines[0].bars.empty());
+        REQUIRE(scene.lines[0].runs == stroke.lines[0].runs);
+        REQUIRE(scene.lines[0].triangles == stroke.lines[0].triangles);
+    }
+    SECTION("past a line's share of the vertices")
+    {
+        const std::vector<double> small = noisy(4000, 2.0);
+        Adaptive many(small);
+        for (int i = 0; i < 999; ++i) {
+            (void)many.figure.plot().addLine(small.data(), static_cast<long long>(small.size()));
+        }
+        const Scene scene = many.figure.scene();
+        REQUIRE(scene.lines[0].bars.empty());
+        REQUIRE_FALSE(scene.lines[0].runs.empty());
+    }
+}
+
+TEST_CASE("the stroke's values are the data's, wherever the columns put it", "[adaptive]")
+{
+    const std::vector<double> values = burst(400000, 150000, 250000);
+    Adaptive adaptive(values);
+    const Scene scene = adaptive.figure.scene();
+    const DrawnLine& line = scene.lines[0];
+    REQUIRE(line.values.size() == line.runs.size());
+    for (const std::vector<Point>& run : line.values) {
+        for (const Point& point : run) {
+            const auto at = static_cast<std::size_t>(std::llround(point.x()));
+            REQUIRE(at < values.size());
+            REQUIRE(point.y() == Approx(values[at]).margin(1e-6));
+        }
+    }
+}
+
+TEST_CASE("a marker marks a sample, whichever form it is drawn in", "[adaptive]")
+{
+    // Markers only come with a fold of bucket one, which is under a sample a
+    // column, so here adaptive is a stroke and the two must agree.
+    const std::vector<double> values = noisy(100000, 2.0);
+    Adaptive adaptive(values);
+    FigureSettings settings = adaptive.figure.settings();
+    settings.markers = true;
+    adaptive.figure.setSettings(settings);
+    (void)adaptive.figure.scene();
+    const double y0 = adaptive.figure.camera().viewMinY();
+    const double y1 = adaptive.figure.camera().viewMaxY();
+    adaptive.figure.setViewRange(1000.0, 1300.0, y0, y1);
+    const Scene mixed = adaptive.figure.scene();
+    settings.drawing = LineDrawing::Stroke;
+    adaptive.figure.setSettings(settings);
+    const Scene stroked = adaptive.figure.scene();
+    REQUIRE_FALSE(stroked.lines[0].markers.empty());
+    REQUIRE(mixed.lines[0].markers.size() == stroked.lines[0].markers.size());
+}
+
+TEST_CASE("a picture is decided for its own columns and leaves the pane's as they were",
+          "[adaptive]")
+{
+    const std::vector<double> values = burst(400000, 150000, 250000);
+    Adaptive adaptive(values);
+    const std::vector<Point> before = adaptive.figure.scene().lines[0].bars;
+
+    SceneRequest request;
+    request.picture = true;
+    request.width = 1600.0;
+    request.height = 800.0;
+    request.pixelRatio = 1.0;
+    const Scene picture = adaptive.figure.scene(request);
+    REQUIRE_FALSE(picture.lines[0].bars.empty());
+    REQUIRE(picture.lines[0].runs.size() == 2);
+    REQUIRE(insideABar(picture.lines[0], picture.lines[0].runs[0].back()));
+
+    REQUIRE(adaptive.figure.scene().lines[0].bars == before);
 }

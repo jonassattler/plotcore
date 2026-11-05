@@ -53,6 +53,9 @@ struct DrawnColumns
 {
     const double* lows = nullptr;
     const double* highs = nullptr;
+    /// What is unusual about each of them, as a ColumnKind, or null when nothing
+    /// is.
+    const unsigned char* kinds = nullptr;
     int count = 0;
 };
 
@@ -110,9 +113,11 @@ public:
     [[nodiscard]] virtual PlotLine drawLine(int line) const = 0;
     /// The x axis that line is drawn against, on the same terms.
     [[nodiscard]] virtual PlotAxis drawAxis(int line) const = 0;
-    /// The line on the columns of `grid`, for FigureSettings::bars -- or nothing,
+    /// The line on the columns of `grid`, for a line drawn as bars -- or nothing,
     /// and the figure then strokes it as usual, when a column inside the line
-    /// holds no element or would have to be cut finer than what is held.
+    /// holds no element or would have to be cut finer than what is held. With
+    /// `grid.partial` such a column is NaN like any other with nothing to draw,
+    /// and only a line that has no columns at all is refused.
     ///
     /// A question and not news: it may be asked for a picture's grid as well as
     /// the pane's, and must read nothing to answer. A source with no way of

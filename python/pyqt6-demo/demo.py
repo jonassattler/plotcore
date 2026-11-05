@@ -221,17 +221,19 @@ class DemoWindow(QMainWindow):
         self.markers = QCheckBox("Markers")
         self.cursor = QCheckBox("Crosshair")
         self.cursor.setChecked(True)
-        self.bars = QCheckBox("Bars")
-        self.bars.setToolTip("One bar a device column, from its smallest value to its largest, "
-                             "wherever a line has a sample in every column")
-        self.bars.toggled.connect(changed)
+        self.drawing = QComboBox()
+        self.drawing.addItems(["stroke", "bars", "adaptive"])
+        self.drawing.setToolTip("stroke: through the extremes of each bucket. bars: one a device "
+                                "column, smallest to largest. adaptive: bars where a line fills "
+                                "its columns, a stroke where it is a line.")
+        self.drawing.currentTextChanged.connect(changed)
         self.markers.toggled.connect(changed)
         self.cursor.toggled.connect(changed)
         self.line_width = spin(0.5, 8.0, 1.0, 1)
         self.line_width.setSingleStep(0.5)
         self.line_width.valueChanged.connect(self._apply_style)
         row = QHBoxLayout()
-        for widget in (self.markers, self.cursor, self.bars, QLabel("width"), self.line_width):
+        for widget in (self.markers, self.cursor, self.drawing, QLabel("width"), self.line_width):
             row.addWidget(widget)
         form.addRow("Draw", row)
 
@@ -466,7 +468,7 @@ class DemoWindow(QMainWindow):
         s["yLabel"] = self.y_label.text()
         s["markers"] = self.markers.isChecked()
         s["cursor"] = self.cursor.isChecked()
-        s["bars"] = self.bars.isChecked()
+        s["drawing"] = self.drawing.currentText()
         if self.colour_mode.currentText():
             s["colours.mode"] = self.colour_mode.currentText()
         s["colours.reversed"] = self.reversed.isChecked()
@@ -676,7 +678,7 @@ class DemoWindow(QMainWindow):
             self.y_label.setText(s["yLabel"])
             self.markers.setChecked(s["markers"])
             self.cursor.setChecked(s["cursor"])
-            self.bars.setChecked(s["bars"])
+            self.drawing.setCurrentText(s["drawing"])
             self.colour_mode.setCurrentText(s["colours.mode"])
             self.reversed.setChecked(s["colours.reversed"])
             self.band_from.setValue(round(s["colours.from"] * 100))
@@ -823,15 +825,23 @@ class DemoWindow(QMainWindow):
         def barred(scene) -> int:
             return sum(1 for line in scene.lines if len(line.bars))
 
-        check(barred(frame()) == 0, "bars are off until they are asked for")
-        self.bars.setChecked(True)
+        check(barred(frame()) == 0, "a line is a stroke until it is asked to be anything else")
+        self.drawing.setCurrentText("bars")
         scene = frame()
         check(len(scene.lines) == 8 and barred(scene) > 0, "bars, for the lines dense enough")
         self.flipped.setChecked(True)
         check(barred(frame()) > 0, "...and across the pane when flipped")
         self.flipped.setChecked(False)
-        self.bars.setChecked(False)
-        check(barred(frame()) == 0, "...and a stroke again when they are put away")
+        self.drawing.setCurrentText("adaptive")
+        # The twelve decades stretch the y axis until every other line lies flat,
+        # and a flat line is a stroke. Close enough to see the ten million as a
+        # band, it is bars.
+        check(barred(frame()) == 0, "adaptive: a line squeezed flat is a stroke")
+        self.figure.set_view(0.0, 1e7, -1.5, 1.5)
+        check(barred(frame()) > 0, "...and a band seen close enough is bars")
+        self.figure.reset_view()
+        self.drawing.setCurrentText("stroke")
+        check(barred(frame()) == 0, "...and a stroke again when it is put back")
 
         self.markers.setChecked(True)
         self.line_width.setValue(2.0)

@@ -59,6 +59,7 @@ function, because libm is allowed to differ by an ulp between platforms:
 | `quadratic N SCALE` | `SCALE * (i + 1) * (i + 1)` |
 | `square N PERIOD LOW HIGH` | `LOW` in the first half of each period, `HIGH` in the second |
 | `holes N EVERY` | `i`, but NaN wherever `i % EVERY < 3` |
+| `burst N FROM TO` | `i * 0.0001`, but from `FROM` up to `TO`, -100 where `i` is even and 100 where it is odd |
 | `walk N SEED` | a random walk: `state = state * 1103515245 + 12345` modulo 2³², then `at += ((state >> 16) & 0x7fff) / 32767 - 0.5`, plus 500 on every element where `i % 997 == 996` |
 
 ## The digest
@@ -96,6 +97,6 @@ line of its own, in the order it is painted.
 
 `SUM_X` and `SUM_Y` add up every run point's coordinates (or both ends of every
 segment) in order, and `SUM_VALUE_X` and `SUM_VALUE_Y` the same points in the
-data's own units. A `bars` line follows a line's `window` only when the line is
-drawn as bars, and adds up both corners of each. A legend appears only when it
-has entries, and its rect only then.
+data's own units. A `bars` line follows a line's `window` only when any of the
+line is drawn as bars, and adds up both corners of each. A legend appears only
+when it has entries, and its rect only then.

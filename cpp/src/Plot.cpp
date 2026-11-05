@@ -107,6 +107,7 @@ struct Plot::Line
     mutable std::optional<ColumnGrid> barGrid;
     mutable std::vector<double> barLows;
     mutable std::vector<double> barHighs;
+    mutable std::vector<unsigned char> barKinds;
 
     void forget() const
     {
@@ -680,7 +681,7 @@ DrawnColumns Plot::drawColumns(int line, const ColumnGrid& grid) const
         const long long along = grid.first - held.barGrid->first;
         const auto kept = static_cast<long long>(grid.count) - std::abs(along);
         if (kept > 0) {
-            const auto move = [&](std::vector<double>& values) {
+            const auto move = [&](auto& values) {
                 if (along > 0) {
                     std::copy(values.begin() + along, values.end(), values.begin());
                 }
@@ -690,6 +691,7 @@ DrawnColumns Plot::drawColumns(int line, const ColumnGrid& grid) const
             };
             move(held.barLows);
             move(held.barHighs);
+            move(held.barKinds);
             from = along > 0 ? static_cast<int>(kept) : 0;
             to = along > 0 ? grid.count : static_cast<int>(-along);
         }
@@ -697,6 +699,7 @@ DrawnColumns Plot::drawColumns(int line, const ColumnGrid& grid) const
     held.barGrid.reset();
     held.barLows.resize(static_cast<std::size_t>(grid.count));
     held.barHighs.resize(static_cast<std::size_t>(grid.count));
+    held.barKinds.resize(static_cast<std::size_t>(grid.count));
 
     // Asked of every column before any is folded, because one that cannot be
     // drawn means a stroke and not a bar. A column with no element inside the
@@ -710,11 +713,14 @@ DrawnColumns Plot::drawColumns(int line, const ColumnGrid& grid) const
     for (std::size_t i = 0; i <= fresh; ++i) {
         edges[i] = elementAt(grid.first + from + static_cast<long long>(i));
     }
-    for (std::size_t i = 0; i < fresh; ++i) {
-        const long long first = std::min(edges[i], edges[i + 1]);
-        const long long last = std::max(edges[i], edges[i + 1]);
-        if (first > 0 && last < count && last - first < base) {
-            return {};
+    const auto undrawable = [&](long long first, long long last) {
+        return first > 0 && last < count && last - first < base;
+    };
+    if (!grid.partial) {
+        for (std::size_t i = 0; i < fresh; ++i) {
+            if (undrawable(std::min(edges[i], edges[i + 1]), std::max(edges[i], edges[i + 1]))) {
+                return {};
+            }
         }
     }
 
@@ -725,7 +731,11 @@ DrawnColumns Plot::drawColumns(int line, const ColumnGrid& grid) const
             const auto column = static_cast<std::size_t>(from) + i;
             double low = std::numeric_limits<double>::quiet_NaN();
             double high = low;
-            if (first < last) {
+            held.barKinds[column] =
+                undrawable(first, last)
+                    ? kColumnThin
+                    : (first < last && (first == 0 || last == count) ? kColumnCut : kColumnWhole);
+            if (first < last && held.barKinds[column] != kColumnThin) {
                 const Extremes found = extremesOver(held.pyramid, first, last);
                 if (found.found()) {
                     low = found.lowest;
@@ -758,6 +768,7 @@ DrawnColumns Plot::drawColumns(int line, const ColumnGrid& grid) const
     DrawnColumns drawn;
     drawn.lows = held.barLows.data();
     drawn.highs = held.barHighs.data();
+    drawn.kinds = held.barKinds.data();
     drawn.count = grid.count;
     return drawn;
 }

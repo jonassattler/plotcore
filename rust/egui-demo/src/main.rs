@@ -313,18 +313,25 @@ impl DemoApp {
         ui.horizontal(|ui| {
             toggle(ui, figure, "markers", "markers");
             toggle(ui, figure, "cursor", "crosshair");
-            let mut bars = figure.get_bool("bars").unwrap_or(false);
-            let box_ = ui.checkbox(&mut bars, "bars").on_hover_text(
-                "One bar a device column, from its smallest value to its largest, wherever a \
-                 line has a sample in every column",
-            );
-            if box_.changed() {
-                let _ = figure.set_bool("bars", bars);
-            }
             let mut width = figure.style("lineWidth").unwrap_or(1.0);
             ui.label("width");
             if ui.add(DragValue::new(&mut width).speed(0.1).range(0.5..=8.0)).changed() {
                 let _ = figure.set_style("lineWidth", width);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("drawing");
+            let figure = &mut self.view.figure;
+            let current = figure.get_text("drawing").unwrap_or_default();
+            for name in ["stroke", "bars", "adaptive"] {
+                let chosen = ui.selectable_label(current == name, name).on_hover_text(
+                    "stroke: through the extremes of each bucket. bars: one a device column, \
+                     smallest to largest. adaptive: bars where a line fills its columns, a \
+                     stroke where it is a line.",
+                );
+                if chosen.clicked() {
+                    let _ = figure.set_text("drawing", name);
+                }
             }
         });
         ui.horizontal(|ui| {
@@ -755,8 +762,8 @@ mod self_test {
         let barred =
             |scene: &plotcore::Scene| scene.lines.iter().filter(|l| !l.bars.is_empty()).count();
         let scene = walk.frame(vec![]);
-        walk.check(barred(&scene) == 0, "bars are off until they are asked for");
-        walk.app.view.figure.set_bool("bars", true).unwrap();
+        walk.check(barred(&scene) == 0, "a line is a stroke until it is asked to be anything else");
+        walk.app.view.figure.set_text("drawing", "bars").unwrap();
         let scene = walk.frame(vec![]);
         walk.check(
             scene.lines.len() == 8 && barred(&scene) > 0,
@@ -766,9 +773,19 @@ mod self_test {
         let scene = walk.frame(vec![]);
         walk.check(barred(&scene) > 0, "...and across the pane when flipped");
         walk.app.view.figure.set_bool("flipped", false).unwrap();
-        walk.app.view.figure.set_bool("bars", false).unwrap();
+        walk.app.view.figure.set_text("drawing", "adaptive").unwrap();
+        // The twelve decades stretch the y axis until every other line lies flat,
+        // and a flat line is a stroke. Close enough to see the ten million as a
+        // band, it is bars.
         let scene = walk.frame(vec![]);
-        walk.check(barred(&scene) == 0, "...and a stroke again when they are put away");
+        walk.check(barred(&scene) == 0, "adaptive: a line squeezed flat is a stroke");
+        walk.app.view.figure.set_view(0.0, 1e7, -1.5, 1.5).unwrap();
+        let scene = walk.frame(vec![]);
+        walk.check(barred(&scene) > 0, "...and a band seen close enough is bars");
+        walk.app.view.figure.reset_view().unwrap();
+        walk.app.view.figure.set_text("drawing", "stroke").unwrap();
+        let scene = walk.frame(vec![]);
+        walk.check(barred(&scene) == 0, "...and a stroke again when it is put back");
 
         walk.app.view.figure.set_bool("markers", true).unwrap();
         let mut modes = plotcore::palette_names();

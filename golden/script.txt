@@ -157,7 +157,7 @@ scene
 # --- drawn as bars --------------------------------------------------------------
 clear
 budget 0
-set_bool bars 1
+set_text drawing bars
 line walk 300000 4242 dense
 scene
 wheel 300 250 120 none
@@ -180,5 +180,40 @@ set_bool yLog 1
 scene
 set_bool yLog 0
 size 800 500 1
-set_bool bars 0
+set_text drawing stroke
+scene
+
+# --- each form where it is true -------------------------------------------------
+clear
+set_text drawing adaptive
+line burst 400000 150000 250000 burst
+scene
+press 400 250 left none
+move 427 250 none
+release 427 250 left none
+scene
+wheel 300 250 120 none
+scene
+wheel 300 250 -120 none
+scene
+wheel 300 250 120 none
+scene
+wheel 300 250 -120 none
+scene
+reset
+size 800 500 2
+scene
+set_bool flipped 1
+scene
+set_bool flipped 0
+size 800 500 1
+view 160000 160100 -120 120
+scene
+reset
+line holes 100000 5000 with holes
+scene
+set_bool xLog 1
+scene
+set_bool xLog 0
+set_text drawing stroke
 scene

@@ -197,7 +197,6 @@ const Field<bool FigureSettings::*> kBools[] = {
     {"bandReadout", &FigureSettings::bandReadout},
     {"paneMessage", &FigureSettings::paneMessage},
     {"lineGestures", &FigureSettings::lineGestures},
-    {"bars", &FigureSettings::bars},
 };
 
 const Field<double FigureSettings::*> kNumbers[] = {
@@ -751,6 +750,11 @@ plotcore_status plotcore_set_text(plotcore_figure* figure, const char* name, con
                 return fail(PLOTCORE_ERROR_ARGUMENT, std::string("no such corner: ") + value);
             }
         }
+        else if (key == "drawing") {
+            if (!drawingOf(value, settings.drawing)) {
+                return fail(PLOTCORE_ERROR_ARGUMENT, std::string("no such drawing: ") + value);
+            }
+        }
         else if (key == "colours.mode") {
             if (!isColourMode(value)) {
                 return fail(PLOTCORE_ERROR_ARGUMENT, std::string("no such colours: ") + value);
@@ -861,6 +865,9 @@ plotcore_status plotcore_get_text(const plotcore_figure* figure, const char* nam
         }
         if (key == "legendCorner") {
             return copyText(cornerName(settings.legendCorner), buffer, capacity, length);
+        }
+        if (key == "drawing") {
+            return copyText(drawingName(settings.drawing), buffer, capacity, length);
         }
         if (key == "colours.mode") {
             return copyText(settings.colours.mode, buffer, capacity, length);

@@ -662,15 +662,25 @@ struct ColumnGrid
     long long first = 0;
     /// Device columns the pane has.
     int count = 0;
+    /// Whether a column that cannot be drawn is left as NaN, for a host that
+    /// will stroke it, rather than refusing the whole line. See
+    /// LineSource::drawColumns.
+    bool partial = false;
 
     /// The x where column `k` starts, and the one before it ends.
     [[nodiscard]] double edge(long long k) const;
+    /// Which of this grid's columns, counted from `first`, an axis position
+    /// is in. It may be outside them.
+    [[nodiscard]] long long columnAt(double position) const
+    {
+        return static_cast<long long>(std::floor(position / perColumn)) - first;
+    }
     /// Whether `other` is this grid moved along: the same columns, so what
     /// has been folded for one is true of the other.
     [[nodiscard]] bool sameColumns(const ColumnGrid& other) const
     {
         return perColumn == other.perColumn && logarithmic == other.logarithmic &&
-               base == other.base && count == other.count;
+               base == other.base && count == other.count && partial == other.partial;
     }
     [[nodiscard]] bool operator==(const ColumnGrid&) const = default;
 };
@@ -686,5 +696,152 @@ struct ColumnGrid
 /// by less than a hundredth of a pixel across a pane of four thousand.
 [[nodiscard]] std::optional<ColumnGrid> columnGridFor(double low, double high, bool logarithmic,
                                                       double base, double columns);
+
+// ---------------------------------------------------------------------------
+// Bars where a line fills its columns, a stroke where it is a line
+// ---------------------------------------------------------------------------
+//
+// LineDrawing::Adaptive, and the ten-million chirp is why it exists: both other
+// forms fail on that one line. Where it runs slowly a bar per column is a jagged
+// staircase of what a stroke draws smooth; where a period is a few columns, bars
+// are hard stripes of uneven length; and where it runs fast, a stroke's zigzag
+// leaves slits in a band the data fills. So each column is asked which it is.
+//
+// **A column is a bar if it has a body in common with each neighbour, and neither
+// towers over the other.** Measured against every sample stroked, over the chirp,
+// a noisy line, a clean one and a comb of spikes, that came out closer than either
+// form alone: a mean difference of 3.69% against 4.78% for the stroke and 5.11% for
+// bars. Asking instead how much of the taller neighbour is shared gives a noisy
+// line a stroke wherever it runs steeply. Each half has a case it is for:
+//
+// - A random walk with a spike every 997 elements, at 1.6 columns a spike, has
+//   columns as tall as can be beside columns a few pixels high. Drawn as bars
+//   those are one-pixel stripes of full colour on black, and six times as many of
+//   their pixels swing hard between two frames of a drag as a stroke's do. Height
+//   alone would have kept them; the second half of the test does not.
+// - A clean steep line has neighbours of about one height, which only touch. A
+//   noisy one running as steeply has neighbours of about one height too, with the
+//   noise in common. The first half tells them apart, in pixels, because a share
+//   of the height cannot: it is small for both.
+// - A level line with a little noise on it is all overlap, and is still a line:
+//   what it has in common is under three strokes wide.
+//
+// Three things keep the answer from flickering, in the order they act.
+//
+// **Along the line, stretches have a minimum length.** A gap in a band too short
+// to be anything is filled, which is what keeps a spike in the band: its column
+// and its two neighbours fail the test, and are bars all the same. A burst of
+// bars too short to be a band is dropped. Every border between the two forms is
+// a visible change in the drawing, so they are not spent on a few columns. A gap
+// is only filled at first between stretches at least as long as it is: at 1.2
+// columns a spike, runs of two passing columns alternate with gaps of three, and
+// filling those would make the stripes bars again. Whatever is left is then held
+// to both limits, so no stretch of bars is shorter than `run` and no stroke
+// between two of them narrower than `gap`, whatever the data does.
+//
+// **Across the pane's edge, nothing is decided by where the pane is.** A column's
+// answer depends only on columns near it, over a reach ColumnRule::margin() says,
+// and the columns folded reach that far past both edges. So a pan cannot change
+// any column's answer, because the same columns are asked the same question; the
+// pane's edge is not an edge of anything. Asked of the pane alone, a stretch
+// running off the side would change as it was panned into view.
+//
+// **Over time, entering is harder than leaving.** A column keeps its answer until
+// it is clearly the other (filledColumns), so a zoom that wobbles over a threshold
+// does not flip it back and forth. What is remembered is that first answer and
+// not the final one: the rules above then read the same input every frame, and a
+// still view cannot creep.
+//
+// Where the two forms meet, the stroke ends *inside* the bar: its last point is
+// an element of the bar's column, and a bar holds all of its column's elements,
+// so the stroke reaches the bar at a value the bar has. Cutting the stroke at the
+// column's edge would keep it out of the bar, and at a place that may be above or
+// below it, which is a gap. That is the one place a line overlaps itself, by less
+// than a column, and at part strength it shows as a slightly stronger dot.
+
+/// What a column must have in common with each neighbour to start being a bar and
+/// to go on being one, in widths of the stroke it would otherwise be. Under about
+/// three a bar and a stroke are the same few pixels, and the stroke is the
+/// smoother of the two.
+inline constexpr double kBarEnterOverlap = 3.0;
+inline constexpr double kBarLeaveOverlap = 2.0;
+
+/// How tall the shorter of two neighbours must be, as a share of the taller, for
+/// the same two. See filledColumns.
+inline constexpr double kBarEnterHeights = 0.5;
+inline constexpr double kBarLeaveHeights = 0.35;
+
+/// The shortest stretch of bars, and the widest gap in one that is left a gap,
+/// in logical pixels.
+inline constexpr double kBarRunPixels = 16.0;
+inline constexpr double kBarGapPixels = 8.0;
+
+/// A stretch's limits in the device columns of one pane.
+struct ColumnRule
+{
+    int run = 16;
+    int gap = 8;
+
+    /// How far past a pane's edge a column's answer can reach. A stretch that
+    /// touches the pane and is cut off this far away is longer than `run`
+    /// either way, and a gap cut off that far away is wider than `gap`. A gap's
+    /// answer also reads the stretches either side, and a gap left by a stretch
+    /// that was dropped reads past that one too.
+    [[nodiscard]] int margin() const { return 2 * run + 3 * gap + 2; }
+};
+
+[[nodiscard]] ColumnRule columnRuleFor(double pixelRatio);
+
+/// What can be unusual about a column of a line. See filledColumns.
+enum ColumnKind : unsigned char
+{
+    kColumnWhole = 0,
+    /// It holds too little to draw and is NaN, which is not the same as nothing
+    /// being there: the line goes on through it as a stroke.
+    kColumnThin = 1,
+    /// The line starts or ends inside it, so it holds what it holds and may be
+    /// any height at all: a line ending two elements into a column ends on a bar
+    /// of two elements.
+    kColumnCut = 2,
+};
+
+/// Which columns pass the test, into `filled`, before any stretch is considered.
+///
+/// `tops` and `bottoms` are where each column's largest and smallest are, in
+/// pixels down the pane, NaN for a column with nothing to draw; `strokeWidth`
+/// is in the same pixels. `kinds` is each column's ColumnKind, or empty for none.
+///
+/// A neighbour with nothing drawn is no neighbour, so a band ending at a gap in
+/// the data or at the end of the line is still a band; and neither is a column
+/// that is cut, which takes the answer of the column beside it. Judged like any
+/// other, the stub at the end of a line failed the column next to it, and left a
+/// stroke one column long at the end of a solid band.
+///
+/// A thin neighbour is not the same as none. It shares nothing with what is
+/// beside it. Under a sample a column every column has one, and asked as if they
+/// were gaps, the columns left came out as fragments of bars.
+///
+/// `prior` is the answer each column last had, or empty: a column that had been
+/// filled is held to the lower bars. Feeding `filled` back as `prior` over the
+/// same columns gives the same answer: it cannot creep.
+void filledColumns(std::span<const double> tops, std::span<const double> bottoms,
+                   std::span<const unsigned char> kinds, std::span<const unsigned char> prior,
+                   double strokeWidth, std::vector<unsigned char>& filled);
+
+/// `filled` as stretches, into `dense`: gaps of up to `rule.gap` columns between
+/// two stretches at least as long as the gap filled, then stretches of under
+/// `rule.run` columns dropped, then any gap of up to `rule.gap` left between two
+/// that remain filled. A gap with a thin column in it is not filled, because
+/// that column has no bar to fill it with and the stroke would be left out of it.
+void denseStretches(std::span<const unsigned char> filled, std::span<const unsigned char> kinds,
+                    const ColumnRule& rule, std::vector<unsigned char>& dense);
+
+/// What `from`'s columns answered, moved onto `to`'s, into `out`: each of `to`'s
+/// columns takes the answer of the one at its middle. A column with no such
+/// column has nothing to remember, and comes back zero, and so does every one
+/// when the axes do not compare. What keeps a zoom's answers from starting afresh
+/// at every notch, whose columns are all new ones in the same place.
+void carriedColumns(const ColumnGrid& from, std::span<const unsigned char> answers,
+                    const ColumnGrid& to, std::vector<unsigned char>& out);
 
 } // namespace plotcore

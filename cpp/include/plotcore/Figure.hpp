@@ -46,6 +46,7 @@
 #include "plotcore/Ticks.hpp"
 
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -171,6 +172,26 @@ enum class Corner
     BottomRight,
 };
 
+/// How a line is drawn.
+enum class LineDrawing
+{
+    /// A stroke through the extremes of each bucket: smooth where the line is a
+    /// line, and with slits in a band the data fills.
+    Stroke,
+    /// One bar per device column, from the smallest value of the column to the
+    /// largest, wherever every column holds an element and the line's share of
+    /// the vertex budget reaches a column a pixel: see ColumnGrid.
+    Bars,
+    /// Each where it is true, along the line: see the head of "Bars where a line
+    /// fills its columns" in Levels.hpp.
+    Adaptive,
+};
+
+/// What a saved view and the C interface call one.
+[[nodiscard]] const char* drawingName(LineDrawing drawing);
+/// The one so named, into `out`; false for no such name.
+[[nodiscard]] bool drawingOf(const std::string& name, LineDrawing& out);
+
 /// Everything a reader chooses about the plot as a whole -- PlotSurface's
 /// drawing settings.
 struct FigureSettings
@@ -218,11 +239,8 @@ struct FigureSettings
     bool paper = false;
     /// Every drawn line in an equal band of the pane.
     bool stacked = false;
-    /// A line drawn as one bar per device column, from the smallest value of
-    /// the column to the largest, wherever it is dense enough to be: every
-    /// column holds an element and the line's share of the vertex budget
-    /// reaches a column a pixel. See ColumnGrid, and DrawnLine::bars.
-    bool bars = false;
+    /// How a line is drawn.
+    LineDrawing drawing = LineDrawing::Stroke;
 };
 
 /// What a reader chooses about one line.
@@ -355,13 +373,15 @@ struct DrawnLine
     /// ...and as one triangle strip a run, two points a sample: the same
     /// triangles at a third of the points, for a host that draws strips.
     std::vector<std::vector<Point>> strips;
-    /// The line as bars, when FigureSettings::bars is on, the host asked for
-    /// them and the line is dense enough: two corners a bar, its top left and
-    /// its bottom right, filled in the line's colour. They are on device pixels
-    /// across a column and carry a fraction of one along it, so a host fills
-    /// them antialiased and each end of a bar covers what it should; and they
-    /// do not overlap, so a line drawn at part strength stays one strength.
-    /// A line drawn as bars has no runs, triangles or strips.
+    /// The line as bars, wherever FigureSettings::drawing and the host have it
+    /// so: two corners a bar, its top left and its bottom right, filled in the
+    /// line's colour. They are on device pixels across a column and carry a
+    /// fraction of one along it, so a host fills them antialiased and each end
+    /// of a bar covers what it should; and they do not overlap, so a line drawn
+    /// at part strength stays one strength.
+    ///
+    /// A line drawn adaptively has both these and runs, which end inside the
+    /// bars they meet, so a host paints both, and in this order.
     std::vector<Point> bars;
     /// ...and the same corners in the data's own units, for the host `values`
     /// is for.
@@ -509,7 +529,7 @@ struct SceneOptions
     bool strips = false;
     bool values = true;
     /// Whether this host paints DrawnLine::bars. One that does not is handed
-    /// the stroke, whatever FigureSettings::bars says.
+    /// the stroke, whatever FigureSettings::drawing says.
     bool bars = true;
 };
 
@@ -650,6 +670,23 @@ public:
     bool restore(const std::string& json);
 
 private:
+    /// One line's bars, and what the stroke beside them needs to know.
+    struct LineBars
+    {
+        /// Two corners a bar, in the pane as it is before a flip.
+        std::vector<Point> corners;
+        /// The columns folded, reaching past the pane by `margin` either side,
+        /// and which of them are bars.
+        ColumnGrid grid;
+        std::vector<unsigned char> dense;
+        int margin = 0;
+    };
+    struct ColumnMemory
+    {
+        ColumnGrid grid;
+        std::vector<unsigned char> filled;
+    };
+
     struct Layout;
     struct LineWindow;
 
@@ -676,10 +713,11 @@ private:
     [[nodiscard]] PlotView paneView(const Layout& layout) const;
     [[nodiscard]] Scene compose(const SceneRequest& request);
     /// The numbers a band being drawn writes beside itself (PlotBand.qml).
-    /// `line` as bars in `view`, as the corners of each with x and y as they
-    /// are before a flip, or false when it is to be stroked.
-    [[nodiscard]] bool barsOf(int index, const PlotLine& line, const PlotView& view,
-                              std::vector<Point>& corners) const;
+    /// `line` as bars in `view`, or false when it is to be stroked. `remember` is
+    /// whether what was decided counts as what this line last drew, which a
+    /// picture's does not.
+    [[nodiscard]] bool barsOf(int index, const PlotLine& line, const PlotView& view, bool remember,
+                              LineBars& out);
     void bandReadout(Scene& scene, const Layout& layout) const;
     /// `text` cut to `width` in `role`'s face, with an ellipsis at its end
     /// or, `middle`, in its middle -- as Qt elides a Text.
@@ -706,6 +744,10 @@ private:
     Camera camera_;
     FigureSettings settings_;
     std::vector<LineSettings> lines_;
+    /// What each line's columns last answered, by the line's number: see
+    /// filledColumns. A line that is gone leaves an answer that is only ever
+    /// a lean, for a line that takes its number, one notch of a zoom long.
+    std::map<int, ColumnMemory> columnMemory_;
     FigureStyle style_;
     TextMeasure measure_;
     bool approximate_ = true;

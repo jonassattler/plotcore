@@ -205,9 +205,12 @@ static void contract(void)
     plotcore_scene_free(scene);
 
     /* Bars take the place of a dense line's stroke, for a host that asks. */
-    CHECK(plotcore_set_bool(figure, "bars", 1) == PLOTCORE_OK);
-    int32_t barsOn = 0;
-    CHECK(plotcore_get_bool(figure, "bars", &barsOn) == PLOTCORE_OK && barsOn == 1);
+    CHECK(plotcore_set_text(figure, "drawing", "bars") == PLOTCORE_OK);
+    char drawing[16];
+    int64_t drawingLength = 0;
+    CHECK(plotcore_get_text(figure, "drawing", drawing, 16, &drawingLength) == PLOTCORE_OK);
+    CHECK(strcmp(drawing, "bars") == 0);
+    CHECK(plotcore_set_text(figure, "drawing", "plaid") == PLOTCORE_ERROR_ARGUMENT);
     scene = plotcore_scene_new(figure);
     int64_t barred = -1;
     for (int64_t i = 0; i < plotcore_scene_line_count(scene); ++i) {
@@ -231,7 +234,7 @@ static void contract(void)
     CHECK(plotcore_scene_line_bar_count(scene, barred) > 0);
     CHECK(plotcore_scene_line_bar_values(scene, barred) == NULL);
     plotcore_scene_free(scene);
-    CHECK(plotcore_set_bool(figure, "bars", 0) == PLOTCORE_OK);
+    CHECK(plotcore_set_text(figure, "drawing", "stroke") == PLOTCORE_OK);
 
     request.forms = PLOTCORE_FORM_ALL;
     request.picture = 1;
@@ -512,6 +515,14 @@ static double* generate(char** words, int count, int64_t* length, int* used)
             v[i] = (i % period) < period / 2 ? low : high;
         }
         *used = 5;
+    }
+    else if (strcmp(kind, "burst") == 0 && count >= 4) {
+        const int64_t from = atoll(words[2]);
+        const int64_t to = atoll(words[3]);
+        for (int64_t i = 0; i < n; ++i) {
+            v[i] = i >= from && i < to ? (i % 2 == 0 ? -100.0 : 100.0) : (double)i * 0.0001;
+        }
+        *used = 4;
     }
     else if (strcmp(kind, "holes") == 0 && count >= 3) {
         const int64_t every = atoll(words[2]);

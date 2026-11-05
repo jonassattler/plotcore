@@ -190,8 +190,9 @@ def test_a_dense_line_can_be_drawn_as_a_bar_a_column():
     with plotcore.Figure() as figure:
         figure.add_line(np.arange(200_000) % 977, "dense")
         assert figure.scene().lines[0].bars.shape == (0, 2)
-        figure.settings["bars"] = True
-        assert figure.settings["bars"]
+        assert figure.settings["drawing"] == "stroke"
+        figure.settings["drawing"] = "bars"
+        assert figure.settings["drawing"] == "bars"
         scene = figure.scene()
         line = scene.lines[0]
         assert line.runs == [] and len(line.triangles) == 0
@@ -203,6 +204,25 @@ def test_a_dense_line_can_be_drawn_as_a_bar_a_column():
         # A host that does not paint them is handed the stroke.
         plain = figure.scene(forms=plotcore.FORM_RUNS | plotcore.FORM_VALUES).lines[0]
         assert len(plain.bars) == 0 and len(plain.runs) > 0
+
+
+def test_a_line_can_be_a_stroke_and_bars_in_one():
+    values = np.sin(np.arange(400_000) * 2e-5)
+    values[150_000:250_000] = np.where(np.arange(100_000) % 2 == 0, -1.0, 1.0)
+    with plotcore.Figure() as figure:
+        figure.add_line(values, "burst")
+        figure.settings["drawing"] = "adaptive"
+        line = figure.scene().lines[0]
+        assert len(line.bars) > 0
+        assert len(line.runs) == 2
+        # The stroke runs up to the bars, and on into them.
+        tops, bottoms = line.bars[0::2], line.bars[1::2]
+        for end in (line.runs[0][-1], line.runs[1][0]):
+            inside = (tops[:, 0] <= end[0]) & (end[0] <= bottoms[:, 0]) \
+                & (tops[:, 1] <= end[1]) & (end[1] <= bottoms[:, 1])
+            assert inside.any()
+        with pytest.raises(plotcore.Error):
+            figure.settings["drawing"] = "plaid"
 
 
 def test_a_scene_outlives_its_figure_and_holds_numpy():

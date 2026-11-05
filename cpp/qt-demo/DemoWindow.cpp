@@ -305,10 +305,13 @@ QWidget* DemoWindow::linesPanel()
     markers_ = new QCheckBox(QStringLiteral("Markers"));
     cursor_ = new QCheckBox(QStringLiteral("Crosshair"));
     cursor_->setChecked(true);
-    bars_ = new QCheckBox(QStringLiteral("Bars"));
-    bars_->setToolTip(QStringLiteral("One bar a device column, from its smallest value to its "
-                                     "largest, wherever a line has a sample in every column"));
-    connect(bars_, &QCheckBox::toggled, this, settingsChanged);
+    drawing_ = new QComboBox;
+    drawing_->addItems(
+        {QStringLiteral("stroke"), QStringLiteral("bars"), QStringLiteral("adaptive")});
+    drawing_->setToolTip(QStringLiteral("stroke: through the extremes of each bucket. bars: one a "
+                                        "device column, smallest to largest. adaptive: bars where "
+                                        "a line fills its columns, a stroke where it is a line."));
+    connect(drawing_, &QComboBox::currentTextChanged, this, settingsChanged);
     connect(markers_, &QCheckBox::toggled, this, settingsChanged);
     connect(cursor_, &QCheckBox::toggled, this, settingsChanged);
     lineWidth_ = spin(0.5, 8.0, 1.0, 1);
@@ -317,7 +320,7 @@ QWidget* DemoWindow::linesPanel()
     auto* row = new QHBoxLayout;
     row->addWidget(markers_);
     row->addWidget(cursor_);
-    row->addWidget(bars_);
+    row->addWidget(drawing_);
     row->addWidget(new QLabel(QStringLiteral("width")));
     row->addWidget(lineWidth_);
     form->addRow(QStringLiteral("Draw"), row);
@@ -637,7 +640,7 @@ plotcore::FigureSettings DemoWindow::settings() const
     out.yLabel = yLabel_->text().toStdString();
     out.markers = markers_->isChecked();
     out.cursor = cursor_->isChecked();
-    out.bars = bars_->isChecked();
+    (void)plotcore::drawingOf(drawing_->currentText().toStdString(), out.drawing);
     out.colours.mode = colourMode_->currentText().toStdString();
     out.colours.reversed = reversed_->isChecked();
     out.colours.single = singleColour_;
@@ -924,7 +927,7 @@ void DemoWindow::loadView()
     yLabel_->setText(QString::fromStdString(s.yLabel));
     markers_->setChecked(s.markers);
     cursor_->setChecked(s.cursor);
-    bars_->setChecked(s.bars);
+    drawing_->setCurrentText(QString::fromLatin1(plotcore::drawingName(s.drawing)));
     colourMode_->setCurrentText(QString::fromStdString(s.colours.mode));
     reversed_->setChecked(s.colours.reversed);
     singleColour_ = s.colours.single;
@@ -1093,16 +1096,25 @@ int DemoWindow::selfTest(const QString& picture)
         }
         return lines;
     };
-    check(barred(frame()) == 0, "bars are off until they are asked for");
-    bars_->setChecked(true);
+    check(barred(frame()) == 0, "a line is a stroke until it is asked to be anything else");
+    drawing_->setCurrentText(QStringLiteral("bars"));
     const plotcore::Scene inBars = frame();
     check(inBars.lines.size() == 8 && barred(inBars) > 0, "bars, for the lines dense enough");
     check(inkOf(plot_->render(QSize(800, 500), 2.0)) > 10000, "...painted, at twice the pixels");
     flipped_->setChecked(true);
     check(barred(frame()) > 0, "...and across the pane when flipped");
     flipped_->setChecked(false);
-    bars_->setChecked(false);
-    check(barred(frame()) == 0, "...and a stroke again when they are put away");
+    drawing_->setCurrentText(QStringLiteral("adaptive"));
+    // The twelve decades stretch the y axis until every other line lies flat, and
+    // a flat line is a stroke. Close enough to see the ten million as a band, it
+    // is bars.
+    check(barred(frame()) == 0, "adaptive: a line squeezed flat is a stroke");
+    plot_->figure().setViewRange(0.0, 1e7, -1.5, 1.5);
+    check(barred(frame()) > 0, "...and a band seen close enough is bars");
+    check(inkOf(plot_->render(QSize(800, 500), 2.0)) > 10000, "...painted");
+    plot_->figure().resetView();
+    drawing_->setCurrentText(QStringLiteral("stroke"));
+    check(barred(frame()) == 0, "...and a stroke again when it is put back");
 
     markers_->setChecked(true);
     lineWidth_->setValue(2.0);

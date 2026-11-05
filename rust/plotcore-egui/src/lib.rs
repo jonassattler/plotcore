@@ -490,7 +490,7 @@ mod tests {
     fn a_dense_line_is_painted_as_bars_on_whole_pixels() {
         let ctx = egui::Context::default();
         let mut view = view_of(&[(0..200_000).map(|i| ((i % 977) as f64).sqrt()).collect()]);
-        view.figure.set_bool("bars", true).unwrap();
+        view.figure.set_text("drawing", "bars").unwrap();
         let shapes = frame(&ctx, &mut view, vec![]);
         let scene = view.last_scene().expect("a frame was painted");
         assert!(!scene.lines[0].bars.is_empty());
@@ -506,6 +506,35 @@ mod tests {
             assert_eq!(vertex.pos.x, vertex.pos.x.round(), "a bar is on whole pixels across");
             assert_eq!(vertex.pos.y, vertex.pos.y.round(), "and each part of it along");
         }
+    }
+
+    #[test]
+    fn a_line_with_both_forms_is_painted_as_both() {
+        let ctx = egui::Context::default();
+        let values: Vec<f64> = (0..400_000)
+            .map(|i| {
+                if (150_000..250_000).contains(&i) {
+                    if i % 2 == 0 {
+                        -1.0
+                    } else {
+                        1.0
+                    }
+                } else {
+                    (f64::from(i) * 2e-5).sin()
+                }
+            })
+            .collect();
+        let mut view = view_of(&[values]);
+        view.figure.set_text("drawing", "adaptive").unwrap();
+        let shapes = frame(&ctx, &mut view, vec![]);
+        let scene = view.last_scene().expect("a frame was painted");
+        let line = &scene.lines[0];
+        assert!(!line.bars.is_empty() && !line.triangles.is_empty());
+        let meshes = shapes
+            .iter()
+            .filter(|clipped| matches!(&clipped.shape, Shape::Mesh(m) if !m.vertices.is_empty()))
+            .count();
+        assert_eq!(meshes, 2, "the bars, and the stroke beside them");
     }
 
     #[test]

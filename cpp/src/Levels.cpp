@@ -732,4 +732,147 @@ std::optional<ColumnGrid> columnGridFor(double low, double high, bool logarithmi
     return grid;
 }
 
+ColumnRule columnRuleFor(double pixelRatio)
+{
+    const double ratio = std::max(pixelRatio, 1.0);
+    ColumnRule rule;
+    rule.run = static_cast<int>(std::lround(kBarRunPixels * ratio));
+    rule.gap = static_cast<int>(std::lround(kBarGapPixels * ratio));
+    return rule;
+}
+
+void filledColumns(std::span<const double> tops, std::span<const double> bottoms,
+                   std::span<const unsigned char> kinds, std::span<const unsigned char> prior,
+                   double strokeWidth, std::vector<unsigned char>& filled)
+{
+    const std::size_t count = std::min(tops.size(), bottoms.size());
+    filled.assign(count, 0);
+    const auto drawn = [&](std::size_t c) {
+        return std::isfinite(tops[c]) && std::isfinite(bottoms[c]);
+    };
+    const auto kind = [&](std::size_t c) -> unsigned char {
+        return c < kinds.size() ? kinds[c] : static_cast<unsigned char>(kColumnWhole);
+    };
+    const auto thin = [&](std::size_t c) { return kind(c) == kColumnThin; };
+    // What a column is judged against: a cut one has an accidental height.
+    const auto neighbour = [&](std::size_t c) { return drawn(c) && kind(c) != kColumnCut; };
+    for (std::size_t c = 0; c < count; ++c) {
+        if (!neighbour(c)) {
+            continue;
+        }
+        if ((c > 0 && thin(c - 1)) || (c + 1 < count && thin(c + 1))) {
+            continue;
+        }
+        const bool was = c < prior.size() && prior[c] != 0;
+        const double overlap = (was ? kBarLeaveOverlap : kBarEnterOverlap) * strokeWidth;
+        const double heights = was ? kBarLeaveHeights : kBarEnterHeights;
+        const auto together = [&](std::size_t other) {
+            const double common =
+                std::min(bottoms[c], bottoms[other]) - std::max(tops[c], tops[other]);
+            const double mine = bottoms[c] - tops[c];
+            const double theirs = bottoms[other] - tops[other];
+            return common >= overlap && std::min(mine, theirs) >= heights * std::max(mine, theirs);
+        };
+        const bool left = c > 0 && neighbour(c - 1);
+        const bool right = c + 1 < count && neighbour(c + 1);
+        filled[c] =
+            (left || right) && (!left || together(c - 1)) && (!right || together(c + 1)) ? 1 : 0;
+    }
+    for (std::size_t c = 0; c < count; ++c) {
+        if (kind(c) == kColumnCut && drawn(c)) {
+            filled[c] = (c > 0 && filled[c - 1] != 0) || (c + 1 < count && filled[c + 1] != 0);
+        }
+    }
+}
+
+void denseStretches(std::span<const unsigned char> filled, std::span<const unsigned char> kinds,
+                    const ColumnRule& rule, std::vector<unsigned char>& dense)
+{
+    const auto thin = [&](std::size_t c) { return c < kinds.size() && kinds[c] == kColumnThin; };
+    dense.assign(filled.begin(), filled.end());
+    const std::size_t count = dense.size();
+    // A gap only counts between two stretches: one running off either end of
+    // the columns has an unknown width, and margin() puts that far from the pane.
+    // Measured on `filled`, so one filled gap does not lengthen what the next is
+    // measured against: an answer stays local however long a chain of them runs.
+    std::size_t runStart = count;
+    std::size_t runEnd = count;
+    for (std::size_t c = 0; c < count;) {
+        if (thin(c)) {
+            runStart = runEnd = count;
+            ++c;
+            continue;
+        }
+        if (filled[c] == 0) {
+            ++c;
+            continue;
+        }
+        std::size_t end = c;
+        while (end < count && filled[end] != 0) {
+            ++end;
+        }
+        if (runEnd != count) {
+            const std::size_t gap = c - runEnd;
+            const std::size_t before = runEnd - runStart;
+            const std::size_t after = end - c;
+            if (gap <= static_cast<std::size_t>(rule.gap) && before >= gap && after >= gap) {
+                std::fill(dense.begin() + static_cast<std::ptrdiff_t>(runEnd),
+                          dense.begin() + static_cast<std::ptrdiff_t>(c), 1);
+            }
+        }
+        runStart = c;
+        runEnd = end;
+        c = end;
+    }
+    // ...and a stretch only counts as short if both its ends are in the columns.
+    for (std::size_t c = 0; c < count;) {
+        if (dense[c] == 0) {
+            ++c;
+            continue;
+        }
+        std::size_t end = c;
+        while (end < count && dense[end] != 0) {
+            ++end;
+        }
+        if (c > 0 && end < count && end - c < static_cast<std::size_t>(rule.run)) {
+            std::fill(dense.begin() + static_cast<std::ptrdiff_t>(c),
+                      dense.begin() + static_cast<std::ptrdiff_t>(end), 0);
+        }
+        c = end;
+    }
+    // Dropping a stretch can leave its neighbours closer than the gaps above were
+    // measured to be, and what survived is long enough to be filled between.
+    std::size_t last = count;
+    for (std::size_t c = 0; c < count; ++c) {
+        if (thin(c)) {
+            last = count;
+        }
+        if (dense[c] == 0) {
+            continue;
+        }
+        if (last != count && c - last - 1 <= static_cast<std::size_t>(rule.gap)) {
+            std::fill(dense.begin() + static_cast<std::ptrdiff_t>(last),
+                      dense.begin() + static_cast<std::ptrdiff_t>(c), 1);
+        }
+        last = c;
+    }
+}
+
+void carriedColumns(const ColumnGrid& from, std::span<const unsigned char> answers,
+                    const ColumnGrid& to, std::vector<unsigned char>& out)
+{
+    out.assign(static_cast<std::size_t>(std::max(to.count, 0)), 0);
+    if (from.logarithmic != to.logarithmic || from.base != to.base || !(from.perColumn > 0.0)) {
+        return;
+    }
+    for (std::size_t c = 0; c < out.size(); ++c) {
+        const double middle =
+            (static_cast<double>(to.first) + static_cast<double>(c) + 0.5) * to.perColumn;
+        const long long at = from.columnAt(middle);
+        if (at >= 0 && static_cast<std::size_t>(at) < answers.size()) {
+            out[c] = answers[static_cast<std::size_t>(at)];
+        }
+    }
+}
+
 } // namespace plotcore

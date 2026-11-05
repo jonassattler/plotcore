@@ -35,6 +35,11 @@ def generate(words: List[str]) -> Tuple[np.ndarray, int]:
         period, low, high = int(words[2]), float(words[3]), float(words[4])
         steps = np.arange(n) % period
         return np.where(steps < period // 2, low, high).astype(np.float64), 5
+    if kind == "burst":
+        from_, to = int(words[2]), int(words[3])
+        index = np.arange(n)
+        inside = (index >= from_) & (index < to)
+        return np.where(inside, np.where(index % 2 == 0, -100.0, 100.0), i * 0.0001), 4
     if kind == "holes":
         every = int(words[2])
         return np.where(np.arange(n) % every < 3, np.nan, i), 3

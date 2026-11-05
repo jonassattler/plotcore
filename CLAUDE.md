@@ -97,6 +97,7 @@ each define their own targets.
 | Path | What it is |
 |---|---|
 | `cpp/include/plotcore/`, `cpp/src/` | `plotcore::core`. The arithmetic: `Projection` (where a sample lands, gaps, the thinning, strokes as triangles), `Levels` (the fold and its seams, and the policy over held runs), `RunLadder` (the runs a host that reads on a thread holds under that policy, and the read it is to make next), `Pyramid` (what every run is folded out of), `Budget` (what may be held), `Parallel` (the pool a large fold is spread over). The frame: `Format`, `Ticks`, `Camera`, `Palettes`. Then `LineSource` (what a figure asks of its lines), `Plot` (lines held, and one such source) and `Figure` (the whole plot a host drives). `cpp/src/Json.*` is private. |
+| `cpp/bench/` | `plotcore-bench`, what each way of drawing a line costs and how still it holds, over the demos' signals; `plotcore-bench-qt` is the same through the widget, where painting is most of a frame. Its `--smoke` is a ctest test, and asserts counts. |
 | `cpp/tests/` | The Catch2 suites: `test_plotprojection`, `test_plotlevels`, `test_plotruns`, `test_plotfigure`, `test_plotaxes` (the rules the viewer's suite held its QML axes to), and `test_plotviewer`, which asks again every question H5Scope's parity suite asked and holds the answers to the ones recorded in `viewer/answers.jsonl`. |
 | `cpp/qt/`, `cpp/qt-demo/` | `plotcore::qt`, a `QWidget` over a `Figure`, and the Qt demo. |
 | `c/` | `plotcore.h`, `Figure` as C, built as `plotcore_c`, and `tests/test_capi.c`. |
@@ -195,23 +196,35 @@ answered:
   Nothing is borrowed across it, every failure is a status with
   `plotcore_last_error()` beside it, and `test_capi.c` is compiled as C.
 
-**Bars** (`FigureSettings::bars`, off until a host turns it on) draw a line as
-one rectangle per device column, from the column's smallest value to its
-largest, in `DrawnLine::bars` and in place of its stroke. A stroke's zigzag
-leaves slits in a dense band that the data fills; a bar does not, and the seam
-is what makes two neighbours always touch with nothing joining them. Columns
-are a `ColumnGrid` fixed in x (`Levels.hpp` argues it), so a bar moves a whole
-device pixel at a time, a pan folds only what it uncovers (`Plot::drawColumns`)
-and a y zoom folds nothing. A line **falls back to its stroke** wherever a bar
-would be untrue or unaffordable: a column inside the line with no element
-(under a sample a pixel, the sparse end of a log x, a pause in a time base), a
-column finer than the base, a time base that doubles back, a line's share of
+A line is drawn three ways (`FigureSettings::drawing`, the text setting
+`drawing`), and stroke is the default, so nothing else changes until a host
+asks. **Bars** draw it as one rectangle per device column, from the column's
+smallest value to its largest, in `DrawnLine::bars`. A stroke's zigzag leaves
+slits in a dense band that the data fills; a bar does not, and the seam is what
+makes two neighbours always touch with nothing joining them. Columns are a
+`ColumnGrid` fixed in x (`Levels.hpp` argues it), so a bar moves a whole device
+pixel at a time, a pan folds only what it uncovers (`Plot::drawColumns`) and a
+y zoom folds nothing. A line falls back to its stroke wherever a bar would be
+untrue or unaffordable: a column inside the line with no element, a column
+finer than the base, a time base that doubles back, a line's share of
 `kMaxVertices` under a column a pixel, a host that did not ask for `FORM_BARS`,
 and a source that does not answer `LineSource::drawColumns`, which is every
-source but `Plot` today, the viewer's included. So a line has runs or bars and
-a host paints both. It is on or off for now; choosing between the two along a
-line, by how tall its bars are, is the likely next step, and one line holding
-both forms is already what a host paints.
+source but `Plot` today, the viewer's included. **Adaptive** asks each column
+which it is, because the ten-million chirp shows both forms failing on one
+line: a column is a bar if it has a body in common with each neighbour and
+neither towers over the other (`filledColumns`). Three things keep that from
+flickering, and `Levels.hpp` argues each: stretches have a minimum length and
+gaps a minimum width (`denseStretches`, whatever the data does); a column's
+answer depends only on columns near it, and those are folded past the pane's
+edges (`ColumnRule::margin`), so a pan cannot change one; and entering a form
+is harder than leaving it, with what a column last answered remembered by the
+figure and carried across a zoom (`carriedColumns`). That last one means a view
+reached by different paths can differ where a column lies between the two bars.
+Where the forms meet, the stroke ends inside the bar, on an element of the
+bar's column, so no gap can open; the stroke also moves with the bars in whole
+device pixels. A line then has both runs and bars, so a host paints both, bars
+first. The numbers in those comments come from comparing each form against
+every sample stroked; what each costs and how still it holds is `cpp/bench`.
 
 `golden/` is what holds the three languages to one plot: a script of
 settings and gestures, and the digest of every scene it asks for. `test_capi`

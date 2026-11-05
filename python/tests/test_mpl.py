@@ -40,7 +40,7 @@ def test_bars_are_filled_on_matplotlib_s_axes_in_the_data_s_units():
     values = np.sin(np.arange(200_000) * 0.01)
     with plotcore.Figure() as figure:
         figure.add_line(values, "line")
-        figure.settings["bars"] = True
+        figure.settings["drawing"] = "bars"
         fig = MplFigure(figsize=(8, 5), dpi=100)
         ax = fig.add_subplot(111)
         mpl.draw(figure, ax)
@@ -52,7 +52,7 @@ def test_bars_are_filled_on_matplotlib_s_axes_in_the_data_s_units():
         assert max(tops) == pytest.approx(1.0, abs=0.05)
         assert min(bottoms) == pytest.approx(-1.0, abs=0.05)
 
-        figure.settings["bars"] = False
+        figure.settings["drawing"] = "stroke"
         fig = MplFigure(figsize=(8, 5), dpi=100)
         ax = fig.add_subplot(111)
         mpl.draw(figure, ax)

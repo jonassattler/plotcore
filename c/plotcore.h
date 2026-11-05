@@ -129,7 +129,7 @@ enum
     PLOTCORE_FORM_STRIPS = 4,
     PLOTCORE_FORM_VALUES = 8,
     /* A host that paints plotcore_scene_line_bars asks for this. One that does
-     * not is handed the stroke, whatever the setting `bars` says. */
+     * not is handed the stroke, whatever the setting `drawing` says. */
     PLOTCORE_FORM_BARS = 16,
     PLOTCORE_FORM_ALL = 31
 };
@@ -386,12 +386,13 @@ PLOTCORE_API int64_t plotcore_held_bytes(const plotcore_figure* figure);
 /*
  * The plot as a whole:
  *   bool    xLog yLog flipped minorNumbers markers cursor readout bandReadout
- *           paneMessage lineGestures legend bundle dark paper stacked bars
+ *           paneMessage lineGestures legend bundle dark paper stacked
  *           colours.reversed colours.custom
  *   number  gridStepX gridStepY xLogBase yLogBase highlighted colours.from
  *           colours.to
  *   text    title xLabel yLabel grid ("none" "loose" "dense" "custom")
  *           legendCorner ("top-left" "top-right" "bottom-left" "bottom-right")
+ *           drawing ("stroke" "bars" "adaptive")
  *           colours.mode (a palette, a ramp, "same" or "range")
  *   colour  colours.single colours.rangeFrom colours.rangeTo
  *
@@ -554,13 +555,14 @@ PLOTCORE_API int64_t plotcore_scene_line_strip_length(const plotcore_scene* scen
 PLOTCORE_API const double* plotcore_scene_line_strip(const plotcore_scene* scene, int64_t index,
                                                      int64_t run);
 PLOTCORE_API const double* plotcore_scene_line_markers(const plotcore_scene* scene, int64_t index);
-/* The line as bars, when the setting `bars` is on and it is dense enough: one a
- * device column from the column's smallest value to its largest, in place of
- * its runs, triangles and strips. Two x, y corners a bar, top left and then
- * bottom right, to fill in the line's colour. Across a column they are on device
- * pixels and along it they carry a fraction of one, so a host fills them
- * antialiased; they do not overlap. A line too sparse for them has none and is
- * stroked as usual, so a host paints both forms. */
+/* The line as bars, as the setting `drawing` has it: one a device column from
+ * the column's smallest value to its largest. Two x, y corners a bar, top left
+ * and then bottom right, to fill in the line's colour. Across a column they are
+ * on device pixels and along it they carry a fraction of one, so a host fills
+ * them antialiased; they do not overlap. "bars" has them in place of the line's
+ * runs, triangles and strips where the line is dense enough, and "adaptive" has
+ * them beside the runs along the rest of it, which end inside the bars they
+ * meet. So a host paints both forms, bars first. */
 PLOTCORE_API int64_t plotcore_scene_line_bar_count(const plotcore_scene* scene, int64_t index);
 PLOTCORE_API const double* plotcore_scene_line_bars(const plotcore_scene* scene, int64_t index);
 /* The same corners in the data's own units, when the scene was asked for

@@ -31,6 +31,24 @@ fn generate(words: &[&str]) -> (Vec<f64>, usize) {
             let (low, high) = (number(3), number(4));
             ((0..n).map(|i| if i % period < period / 2 { low } else { high }).collect(), 5)
         }
+        "burst" => {
+            let from: usize = words[2].parse().unwrap();
+            let to: usize = words[3].parse().unwrap();
+            let values = (0..n)
+                .map(|i| {
+                    if i >= from && i < to {
+                        if i % 2 == 0 {
+                            -100.0
+                        } else {
+                            100.0
+                        }
+                    } else {
+                        i as f64 * 0.0001
+                    }
+                })
+                .collect();
+            (values, 4)
+        }
         "holes" => {
             let every: usize = words[2].parse().unwrap();
             ((0..n).map(|i| if i % every < 3 { f64::NAN } else { i as f64 }).collect(), 3)
