@@ -16,6 +16,7 @@ from PyQt6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 from PyQt6.QtGui import QColor, QMouseEvent, QWheelEvent  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+import plotcore  # noqa: E402
 from plotcore.qt import PlotWidget  # noqa: E402
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "pyqt6-demo" / "demo.py"
@@ -45,6 +46,37 @@ def test_the_widget_paints_each_line_in_its_colour(qapp):
         assert found, f"line {line.line} is painted in its colour at its own point"
     ground = image.pixelColor(2, 2)
     assert (ground.redF(), ground.greenF(), ground.blueF()) == pytest.approx(scene.ground[:3])
+
+
+def test_bars_fill_what_a_stroke_leaves_slits_in(qapp):
+    # A band of noise a line's width of pixels never quite covers as a zigzag,
+    # and the same band as bars: a row through the middle of it should be the
+    # line's own colour in every column.
+    rng = np.random.default_rng(11)
+    values = rng.standard_normal(2_000_000)
+    with plotcore.Figure() as figure:
+        figure.add_line(values, "noise")
+        widget = PlotWidget(figure)
+        widget.resize(800, 400)
+        figure.settings["cursor"] = False
+        figure.settings["legend"] = False
+        figure.settings["dark"] = False
+
+        def pale_columns() -> int:
+            image = widget.render(800, 400, 1.0)
+            scene = figure.scene()
+            row = int(scene.area.y + scene.area.height / 2)
+            ground = image.pixelColor(2, 2)
+            first = int(scene.area.x) + 1
+            last = int(scene.area.x + scene.area.width) - 1
+            inks = [image.pixelColor(x, row) for x in range(first, last)]
+            ink = max(set(c.name() for c in inks), key=[c.name() for c in inks].count)
+            assert ink != ground.name()
+            return sum(1 for c in inks if c.name() != ink)
+
+        assert pale_columns() > 0, "or this data does not show what bars are for"
+        figure.settings["bars"] = True
+        assert pale_columns() == 0
 
 
 def test_the_widget_hands_the_figure_its_wheel_and_its_drag(qapp):

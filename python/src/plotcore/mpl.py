@@ -30,13 +30,14 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 try:
+    from matplotlib.collections import PolyCollection
     from matplotlib.patches import Rectangle
     from matplotlib.ticker import MultipleLocator
 except ImportError as error:  # pragma: no cover
     raise ImportError("plotcore.mpl needs matplotlib: pip install plotcore[matplotlib]") from error
 
 from .figure import Button, Figure, Modifiers
-from .scene import FORM_RUNS, FORM_VALUES, Align, Layer, MarkKind, Scene, TextRole
+from .scene import FORM_BARS, FORM_RUNS, FORM_VALUES, Align, Layer, MarkKind, Scene, TextRole
 
 # How far apart the spines of axes of their own sit, in points.
 _SPINE = 48
@@ -152,6 +153,22 @@ def _paint(figure: Figure, scene: Scene, ax, extra: list) -> None:
             marker="o" if markers and len(line.markers) else None,
             markersize=1.5 * line.marker_radius,
         )
+        if len(line.bar_values):
+            # Filled without antialiasing, because matplotlib's pixels are not
+            # the figure's: the bars are a column of the figure's pane wide and
+            # do not land on Agg's pixels, and two neighbours blended at their
+            # shared edge would each leave it part covered.
+            corners = line.bar_values.reshape(-1, 2, 2)
+            if flipped:
+                corners = corners[:, :, ::-1]
+            x0, y0, x1, y1 = corners[:, 0, 0], corners[:, 0, 1], corners[:, 1, 0], corners[:, 1, 1]
+            polygons = np.stack([np.column_stack([x0, y0]), np.column_stack([x1, y0]),
+                                 np.column_stack([x1, y1]), np.column_stack([x0, y1])], axis=1)
+            target.add_collection(
+                PolyCollection(polygons, facecolors=[line.colour[:3]], alpha=line.colour[3],
+                               edgecolors="none", antialiaseds=False),
+                autolim=False,
+            )
         if line.line in names:
             drawn.set_label(names[line.line])
             handles.append(drawn)
@@ -245,7 +262,7 @@ def draw(figure: Figure, ax=None, *, size: Optional[Tuple[int, int]] = None):
         _, ax = plt.subplots()
     width, height = size if size is not None else _pixels_of(ax)
     figure.set_size(width, height)
-    scene = figure.scene(forms=FORM_RUNS | FORM_VALUES)
+    scene = figure.scene(forms=FORM_RUNS | FORM_VALUES | FORM_BARS)
     _paint(figure, scene, ax, [])
     return ax
 
@@ -288,7 +305,7 @@ class View:
         # The figure's pane is laid out at the axes' size, so a pixel of a
         # gesture is a pixel of the line and a band's minimum is a band's.
         self.figure.set_size(width, height)
-        self._scene = self.figure.scene(forms=FORM_RUNS | FORM_VALUES)
+        self._scene = self.figure.scene(forms=FORM_RUNS | FORM_VALUES | FORM_BARS)
         _paint(self.figure, self._scene, self.ax, self._extra)
         self.mpl.canvas.draw_idle()
 

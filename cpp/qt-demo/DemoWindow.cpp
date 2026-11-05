@@ -305,6 +305,10 @@ QWidget* DemoWindow::linesPanel()
     markers_ = new QCheckBox(QStringLiteral("Markers"));
     cursor_ = new QCheckBox(QStringLiteral("Crosshair"));
     cursor_->setChecked(true);
+    bars_ = new QCheckBox(QStringLiteral("Bars"));
+    bars_->setToolTip(QStringLiteral("One bar a device column, from its smallest value to its "
+                                     "largest, wherever a line has a sample in every column"));
+    connect(bars_, &QCheckBox::toggled, this, settingsChanged);
     connect(markers_, &QCheckBox::toggled, this, settingsChanged);
     connect(cursor_, &QCheckBox::toggled, this, settingsChanged);
     lineWidth_ = spin(0.5, 8.0, 1.0, 1);
@@ -313,6 +317,7 @@ QWidget* DemoWindow::linesPanel()
     auto* row = new QHBoxLayout;
     row->addWidget(markers_);
     row->addWidget(cursor_);
+    row->addWidget(bars_);
     row->addWidget(new QLabel(QStringLiteral("width")));
     row->addWidget(lineWidth_);
     form->addRow(QStringLiteral("Draw"), row);
@@ -632,6 +637,7 @@ plotcore::FigureSettings DemoWindow::settings() const
     out.yLabel = yLabel_->text().toStdString();
     out.markers = markers_->isChecked();
     out.cursor = cursor_->isChecked();
+    out.bars = bars_->isChecked();
     out.colours.mode = colourMode_->currentText().toStdString();
     out.colours.reversed = reversed_->isChecked();
     out.colours.single = singleColour_;
@@ -918,6 +924,7 @@ void DemoWindow::loadView()
     yLabel_->setText(QString::fromStdString(s.yLabel));
     markers_->setChecked(s.markers);
     cursor_->setChecked(s.cursor);
+    bars_->setChecked(s.bars);
     colourMode_->setCurrentText(QString::fromStdString(s.colours.mode));
     reversed_->setChecked(s.colours.reversed);
     singleColour_ = s.colours.single;
@@ -1078,6 +1085,25 @@ int DemoWindow::selfTest(const QString& picture)
     const plotcore::Scene turned = frame();
     check(turned.lines.size() == 8, "flipped");
     flipped_->setChecked(false);
+
+    const auto barred = [](const plotcore::Scene& scene) {
+        int lines = 0;
+        for (const plotcore::DrawnLine& line : scene.lines) {
+            lines += line.bars.empty() ? 0 : 1;
+        }
+        return lines;
+    };
+    check(barred(frame()) == 0, "bars are off until they are asked for");
+    bars_->setChecked(true);
+    const plotcore::Scene inBars = frame();
+    check(inBars.lines.size() == 8 && barred(inBars) > 0, "bars, for the lines dense enough");
+    check(inkOf(plot_->render(QSize(800, 500), 2.0)) > 10000, "...painted, at twice the pixels");
+    flipped_->setChecked(true);
+    check(barred(frame()) > 0, "...and across the pane when flipped");
+    flipped_->setChecked(false);
+    bars_->setChecked(false);
+    check(barred(frame()) == 0, "...and a stroke again when they are put away");
+
     markers_->setChecked(true);
     lineWidth_->setValue(2.0);
     for (int i = 0; i < colourMode_->count(); ++i) {

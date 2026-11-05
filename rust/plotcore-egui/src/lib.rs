@@ -346,6 +346,9 @@ pub fn paint_scene(
 
     for line in &scene.lines {
         let ink = colour(line.colour);
+        if !line.bars.is_empty() {
+            pane.add(Shape::mesh(bars_mesh(&line.bars, offset, ink, painter.pixels_per_point())));
+        }
         match strokes {
             Strokes::Triangles => {
                 let mut mesh = Mesh::default();
@@ -370,6 +373,65 @@ pub fn paint_scene(
     for mark in &scene.over {
         paint_mark(painter, &pane, offset, mark, fonts);
     }
+}
+
+/// A run of device pixels from `from` to `to`, as the whole-pixel stretch of it
+/// and the part-covered pixel at each end: (start, end, how much is covered).
+fn device_spans(from: f32, to: f32) -> impl Iterator<Item = (f32, f32, f32)> {
+    // Within this of a whole pixel is that pixel: a coordinate that has been
+    // through a scale in f32 is seldom exactly on one, and a sliver of a pixel
+    // would be painted as a quad of its own.
+    const NEAR: f32 = 1.0 / 256.0;
+    let snap = |v: f32| if (v - v.round()).abs() < NEAR { v.round() } else { v };
+    let (from, to) = (snap(from), snap(to));
+    let (whole_from, whole_to) = (from.ceil(), to.floor());
+    let spans = if whole_from > whole_to {
+        // Inside one pixel, touching neither of its edges.
+        [(from.floor(), from.floor() + 1.0, to - from), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)]
+    } else {
+        [
+            (whole_from - 1.0, whole_from, whole_from - from),
+            (whole_from, whole_to, 1.0),
+            (whole_to, whole_to + 1.0, to - whole_to),
+        ]
+    };
+    spans.into_iter().filter(|&(start, end, cover)| end > start && cover > 0.0)
+}
+
+/// A line's bars as a mesh on device pixels.
+///
+/// A mesh is not antialiased, so what QPainter works out for itself is written
+/// down here: the pixel each end of a bar part covers is a quad of its own, at
+/// that part of the strength. Without it the ends round to a whole pixel, and a
+/// gently sloping stretch of line, every bar of which is about a pixel tall, is
+/// a staircase. The offset is put on a device pixel first, because a widget may
+/// sit between two, and every bar would then be between two as well.
+fn bars_mesh(bars: &[[f64; 2]], offset: Vec2, ink: Color32, pixels_per_point: f32) -> Mesh {
+    let scale = pixels_per_point;
+    let origin = (offset * scale).round();
+    let mut mesh = Mesh::default();
+    for corners in bars.chunks_exact(2) {
+        let across = device_spans(
+            origin.x + corners[0][0] as f32 * scale,
+            origin.x + corners[1][0] as f32 * scale,
+        );
+        for (x0, x1, cover_x) in across {
+            let along = device_spans(
+                origin.y + corners[0][1] as f32 * scale,
+                origin.y + corners[1][1] as f32 * scale,
+            );
+            for (y0, y1, cover_y) in along {
+                mesh.add_colored_rect(
+                    Rect::from_min_max(
+                        Pos2::new(x0 / scale, y0 / scale),
+                        Pos2::new(x1 / scale, y1 / scale),
+                    ),
+                    ink.gamma_multiply(cover_x * cover_y),
+                );
+            }
+        }
+    }
+    mesh
 }
 
 #[cfg(test)]
@@ -422,6 +484,40 @@ mod tests {
         assert_eq!(meshes, 1, "the line is plotcore's own triangles");
         // egui measured the numbers: the left gutter is as wide as they are.
         assert!(scene.area.x > 0.0 && scene.texts().next().is_some());
+    }
+
+    #[test]
+    fn a_dense_line_is_painted_as_bars_on_whole_pixels() {
+        let ctx = egui::Context::default();
+        let mut view = view_of(&[(0..200_000).map(|i| ((i % 977) as f64).sqrt()).collect()]);
+        view.figure.set_bool("bars", true).unwrap();
+        let shapes = frame(&ctx, &mut view, vec![]);
+        let scene = view.last_scene().expect("a frame was painted");
+        assert!(!scene.lines[0].bars.is_empty());
+        assert!(scene.lines[0].triangles.is_empty(), "bars in place of the stroke");
+        let mesh = shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                Shape::Mesh(mesh) if !mesh.vertices.is_empty() => Some(mesh),
+                _ => None,
+            })
+            .expect("the bars are a mesh");
+        for vertex in &mesh.vertices {
+            assert_eq!(vertex.pos.x, vertex.pos.x.round(), "a bar is on whole pixels across");
+            assert_eq!(vertex.pos.y, vertex.pos.y.round(), "and each part of it along");
+        }
+    }
+
+    #[test]
+    fn a_bar_s_ends_are_the_part_of_a_pixel_they_cover() {
+        let spans: Vec<_> = device_spans(10.25, 13.5).collect();
+        assert_eq!(spans, vec![(10.0, 11.0, 0.75), (11.0, 13.0, 1.0), (13.0, 14.0, 0.5)]);
+        let inside: Vec<_> = device_spans(10.25, 10.75).collect();
+        assert_eq!(inside, vec![(10.0, 11.0, 0.5)]);
+        let whole: Vec<_> = device_spans(4.0, 5.0).collect();
+        assert_eq!(whole, vec![(4.0, 5.0, 1.0)]);
+        let nearly: Vec<_> = device_spans(4.001, 4.999).collect();
+        assert_eq!(nearly, vec![(4.0, 5.0, 1.0)], "not a sliver of a pixel at each side");
     }
 
     #[test]

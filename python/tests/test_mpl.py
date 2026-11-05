@@ -36,6 +36,29 @@ def test_a_spike_one_sample_wide_survives_into_matplotlib():
     assert ax.get_ylim() == pytest.approx((y0, y1))
 
 
+def test_bars_are_filled_on_matplotlib_s_axes_in_the_data_s_units():
+    values = np.sin(np.arange(200_000) * 0.01)
+    with plotcore.Figure() as figure:
+        figure.add_line(values, "line")
+        figure.settings["bars"] = True
+        fig = MplFigure(figsize=(8, 5), dpi=100)
+        ax = fig.add_subplot(111)
+        mpl.draw(figure, ax)
+        assert len(ax.collections) == 1
+        bars = ax.collections[0].get_paths()
+        assert len(bars) > 100
+        tops = [path.vertices[:, 1].max() for path in bars]
+        bottoms = [path.vertices[:, 1].min() for path in bars]
+        assert max(tops) == pytest.approx(1.0, abs=0.05)
+        assert min(bottoms) == pytest.approx(-1.0, abs=0.05)
+
+        figure.settings["bars"] = False
+        fig = MplFigure(figsize=(8, 5), dpi=100)
+        ax = fig.add_subplot(111)
+        mpl.draw(figure, ax)
+        assert len(ax.collections) == 0
+
+
 def test_matplotlib_takes_the_scales_the_figure_has():
     figure = plotcore.Figure()
     figure.add_line(10.0 ** np.linspace(-3, 3, 10_000), "decades")

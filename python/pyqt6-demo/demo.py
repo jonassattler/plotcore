@@ -221,13 +221,17 @@ class DemoWindow(QMainWindow):
         self.markers = QCheckBox("Markers")
         self.cursor = QCheckBox("Crosshair")
         self.cursor.setChecked(True)
+        self.bars = QCheckBox("Bars")
+        self.bars.setToolTip("One bar a device column, from its smallest value to its largest, "
+                             "wherever a line has a sample in every column")
+        self.bars.toggled.connect(changed)
         self.markers.toggled.connect(changed)
         self.cursor.toggled.connect(changed)
         self.line_width = spin(0.5, 8.0, 1.0, 1)
         self.line_width.setSingleStep(0.5)
         self.line_width.valueChanged.connect(self._apply_style)
         row = QHBoxLayout()
-        for widget in (self.markers, self.cursor, QLabel("width"), self.line_width):
+        for widget in (self.markers, self.cursor, self.bars, QLabel("width"), self.line_width):
             row.addWidget(widget)
         form.addRow("Draw", row)
 
@@ -462,6 +466,7 @@ class DemoWindow(QMainWindow):
         s["yLabel"] = self.y_label.text()
         s["markers"] = self.markers.isChecked()
         s["cursor"] = self.cursor.isChecked()
+        s["bars"] = self.bars.isChecked()
         if self.colour_mode.currentText():
             s["colours.mode"] = self.colour_mode.currentText()
         s["colours.reversed"] = self.reversed.isChecked()
@@ -671,6 +676,7 @@ class DemoWindow(QMainWindow):
             self.y_label.setText(s["yLabel"])
             self.markers.setChecked(s["markers"])
             self.cursor.setChecked(s["cursor"])
+            self.bars.setChecked(s["bars"])
             self.colour_mode.setCurrentText(s["colours.mode"])
             self.reversed.setChecked(s["colours.reversed"])
             self.band_from.setValue(round(s["colours.from"] * 100))
@@ -813,6 +819,20 @@ class DemoWindow(QMainWindow):
         self.flipped.setChecked(True)
         check(len(frame().lines) == 8, "flipped")
         self.flipped.setChecked(False)
+
+        def barred(scene) -> int:
+            return sum(1 for line in scene.lines if len(line.bars))
+
+        check(barred(frame()) == 0, "bars are off until they are asked for")
+        self.bars.setChecked(True)
+        scene = frame()
+        check(len(scene.lines) == 8 and barred(scene) > 0, "bars, for the lines dense enough")
+        self.flipped.setChecked(True)
+        check(barred(frame()) > 0, "...and across the pane when flipped")
+        self.flipped.setChecked(False)
+        self.bars.setChecked(False)
+        check(barred(frame()) == 0, "...and a stroke again when they are put away")
+
         self.markers.setChecked(True)
         self.line_width.setValue(2.0)
         for i in range(self.colour_mode.count()):

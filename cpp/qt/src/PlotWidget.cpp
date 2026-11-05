@@ -10,6 +10,7 @@
 #include <QWheelEvent>
 
 #include <cmath>
+#include <vector>
 
 namespace plotcore::qt {
 namespace {
@@ -253,6 +254,20 @@ void PlotWidget::paintScene(QPainter& painter, const Scene& scene) const
     painter.setClipRect(area);
     painter.setRenderHint(QPainter::Antialiasing, true);
     for (const DrawnLine& line : scene.lines) {
+        // Antialiased, which on a bar's two ends is what the fraction of a pixel
+        // they carry is for; its sides are on device pixels, so they stay sharp
+        // and two neighbours neither blend twice nor leave a seam.
+        if (!line.bars.empty()) {
+            std::vector<QRectF> bars;
+            bars.reserve(line.bars.size() / 2);
+            for (std::size_t c = 0; c + 1 < line.bars.size(); c += 2) {
+                bars.emplace_back(qpoint(line.bars[c]), qpoint(line.bars[c + 1]));
+            }
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(qcolor(line.colour));
+            painter.drawRects(bars.data(), static_cast<int>(bars.size()));
+            painter.setBrush(Qt::NoBrush);
+        }
         QPen pen(qcolor(line.colour), line.width);
         pen.setJoinStyle(Qt::RoundJoin);
         pen.setCapStyle(Qt::RoundCap);

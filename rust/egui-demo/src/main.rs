@@ -313,6 +313,14 @@ impl DemoApp {
         ui.horizontal(|ui| {
             toggle(ui, figure, "markers", "markers");
             toggle(ui, figure, "cursor", "crosshair");
+            let mut bars = figure.get_bool("bars").unwrap_or(false);
+            let box_ = ui.checkbox(&mut bars, "bars").on_hover_text(
+                "One bar a device column, from its smallest value to its largest, wherever a \
+                 line has a sample in every column",
+            );
+            if box_.changed() {
+                let _ = figure.set_bool("bars", bars);
+            }
             let mut width = figure.style("lineWidth").unwrap_or(1.0);
             ui.label("width");
             if ui.add(DragValue::new(&mut width).speed(0.1).range(0.5..=8.0)).changed() {
@@ -743,6 +751,25 @@ mod self_test {
         let scene = walk.frame(vec![]);
         walk.check(scene.lines.len() == 8, "flipped");
         walk.app.view.figure.set_bool("flipped", false).unwrap();
+
+        let barred =
+            |scene: &plotcore::Scene| scene.lines.iter().filter(|l| !l.bars.is_empty()).count();
+        let scene = walk.frame(vec![]);
+        walk.check(barred(&scene) == 0, "bars are off until they are asked for");
+        walk.app.view.figure.set_bool("bars", true).unwrap();
+        let scene = walk.frame(vec![]);
+        walk.check(
+            scene.lines.len() == 8 && barred(&scene) > 0,
+            "bars, for the lines dense enough",
+        );
+        walk.app.view.figure.set_bool("flipped", true).unwrap();
+        let scene = walk.frame(vec![]);
+        walk.check(barred(&scene) > 0, "...and across the pane when flipped");
+        walk.app.view.figure.set_bool("flipped", false).unwrap();
+        walk.app.view.figure.set_bool("bars", false).unwrap();
+        let scene = walk.frame(vec![]);
+        walk.check(barred(&scene) == 0, "...and a stroke again when they are put away");
+
         walk.app.view.figure.set_bool("markers", true).unwrap();
         let mut modes = plotcore::palette_names();
         modes.extend(plotcore::ramp_names());

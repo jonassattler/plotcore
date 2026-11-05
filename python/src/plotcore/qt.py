@@ -229,6 +229,15 @@ class PlotWidget(QWidget):
         painter.setClipRect(area)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         for line in scene.lines:
+            # Antialiased, which on a bar's two ends is what the fraction of a
+            # pixel they carry is for; its sides are on device pixels, so they
+            # stay sharp and two neighbours neither blend twice nor leave a seam.
+            if len(line.bars):
+                corners = line.bars.reshape(-1, 4).tolist()
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(_qcolor(line.colour))
+                painter.drawRects([QRectF(x0, y0, x1 - x0, y1 - y0) for x0, y0, x1, y1 in corners])
+                painter.setBrush(Qt.BrushStyle.NoBrush)
             pen = QPen(_qcolor(line.colour), line.width)
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)

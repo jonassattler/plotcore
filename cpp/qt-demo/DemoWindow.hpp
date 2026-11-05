@@ -107,6 +107,7 @@ private:
 
     // Lines.
     QCheckBox* markers_ = nullptr;
+    QCheckBox* bars_ = nullptr;
     QCheckBox* cursor_ = nullptr;
     QDoubleSpinBox* lineWidth_ = nullptr;
     QComboBox* colourMode_ = nullptr;
