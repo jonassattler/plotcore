@@ -87,8 +87,24 @@ struct Plot::Line
     mutable std::vector<double> foldXs;
     mutable bool foldSummarised = false;
 
+    // What the axes are drawn between, kept for the reason the folds are, and
+    // for a sharper one: a figure asks for all three once per line per frame.
+    // They were worked out on every asking. smallestPositive() costs a walk of
+    // the base when a line crosses zero throughout, and a time base costs a
+    // walk of itself twice over, so a frame of one line of ten million elements
+    // spent 20.7 ms on a signal around zero against 0.13 ms on the same signal
+    // above it, and 45.8 ms against a time base -- in a pan, where nothing any
+    // of them depends on had moved. forget() is called by everything that can
+    // change them.
+    mutable std::optional<LineExtent> extent;
+    mutable std::optional<Span> timeSpan;
+    mutable std::optional<double> timePositive;
+
     void forget() const
     {
+        extent.reset();
+        timeSpan.reset();
+        timePositive.reset();
         summaryColumns = -1;
         window.reset();
         closer.clear();
@@ -337,11 +353,16 @@ LineExtent Plot::extent(int line) const
     if (!held.finished || held.pyramid.empty()) {
         return found;
     }
+    if (held.extent.has_value()) {
+        return *held.extent;
+    }
+    ++wholeLineWalks_;
     const Extremes all = extremesOver(held.pyramid, 0, held.pyramid.length);
     found.finite = all.found();
     found.minimum = all.lowest;
     found.maximum = all.highest;
     found.positive = smallestPositive(held.pyramid, found.positiveMinimum);
+    held.extent = found;
     return found;
 }
 
@@ -350,6 +371,10 @@ Span Plot::xExtent(int line) const
     const Line& held = at(line);
     const long long count = held.length;
     if (const std::vector<double>* time = timeOf(held)) {
+        if (held.timeSpan.has_value()) {
+            return *held.timeSpan;
+        }
+        ++wholeLineWalks_;
         const auto drawn = static_cast<std::size_t>(std::min<long long>(count, time->size()));
         double low = std::numeric_limits<double>::infinity();
         double high = -std::numeric_limits<double>::infinity();
@@ -360,7 +385,8 @@ Span Plot::xExtent(int line) const
                 high = std::max(high, t);
             }
         }
-        return low <= high ? Span{low, high} : Span{0.0, 0.0};
+        held.timeSpan = low <= high ? Span{low, high} : Span{0.0, 0.0};
+        return *held.timeSpan;
     }
     const double first = indexStart_;
     const double last =
@@ -372,6 +398,10 @@ double Plot::xPositiveMinimum(int line) const
 {
     const Line& held = at(line);
     if (const std::vector<double>* time = timeOf(held)) {
+        if (held.timePositive.has_value()) {
+            return *held.timePositive;
+        }
+        ++wholeLineWalks_;
         const auto drawn = static_cast<std::size_t>(std::min<long long>(held.length, time->size()));
         double best = 0.0;
         for (std::size_t i = 0; i < drawn; ++i) {
@@ -380,6 +410,7 @@ double Plot::xPositiveMinimum(int line) const
                 best = t;
             }
         }
+        held.timePositive = best;
         return best;
     }
     const Span span = xExtent(line);

@@ -149,6 +149,111 @@ TEST_CASE("a line copied in is drawn as its own elements, at every zoom", "[plot
     }
 }
 
+TEST_CASE("panning a figure walks no line's extent again", "[plot]")
+{
+    // Around zero throughout, because a line that stays above it answers
+    // smallestPositive() from its top bucket and this would pass over the walk.
+    const std::size_t count = 200000;
+    std::vector<double> values(count);
+    std::vector<double> time(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        values[i] = i % 2 == 0 ? 1.0 : -1.0;
+        time[i] = 1000.0 + static_cast<double>(i);
+    }
+
+    const auto walksOfAPan = [&](bool timed) {
+        Figure figure;
+        figure.setSize(800.0, 400.0);
+        (void)figure.plot().addLine(values.data(), static_cast<long long>(count));
+        if (timed) {
+            figure.plot().setTime(time.data(), static_cast<long long>(count));
+        }
+        (void)figure.scene();
+        const long long before = figure.plot().wholeLineWalks();
+        REQUIRE(before > 0);
+        const double x0 = figure.camera().viewMinX();
+        const double span = (figure.camera().viewMaxX() - x0) / 4.0;
+        const double y0 = figure.camera().viewMinY();
+        const double y1 = figure.camera().viewMaxY();
+        for (int frame = 0; frame < 20; ++frame) {
+            const double at = x0 + span + frame * 10.0;
+            figure.setViewRange(at, at + span, y0, y1);
+            (void)figure.scene();
+        }
+        return figure.plot().wholeLineWalks() - before;
+    };
+    REQUIRE(walksOfAPan(false) == 0);
+    REQUIRE(walksOfAPan(true) == 0);
+}
+
+TEST_CASE("what a line spans is worked out again when what it was worked out from changes",
+          "[plot]")
+{
+    const std::vector<double> values = {-3.0, 0.25, 4.0, -1.0, 2.0, 0.5};
+    const auto count = static_cast<long long>(values.size());
+    const std::vector<double> time = {10.0, 11.0, 12.0, 13.0, 14.0, 15.0};
+    const std::vector<double> own = {-20.0, -10.0, 5.0, 6.0, 7.0, 8.0};
+    Plot plot;
+    const int line = plot.addLine(values.data(), count);
+
+    SECTION("the values are kept, and are the same answer")
+    {
+        const LineExtent first = plot.extent(line);
+        const long long walks = plot.wholeLineWalks();
+        const LineExtent second = plot.extent(line);
+        REQUIRE(plot.wholeLineWalks() == walks);
+        REQUIRE(second.minimum == first.minimum);
+        REQUIRE(second.maximum == first.maximum);
+        REQUIRE(second.positiveMinimum == first.positiveMinimum);
+    }
+    SECTION("a stated index axis moves the span")
+    {
+        REQUIRE(plot.xExtent(line).high == 5.0);
+        plot.setIndexAxis(100.0, 2.0);
+        REQUIRE(plot.xExtent(line).low == 100.0);
+        REQUIRE(plot.xExtent(line).high == 110.0);
+    }
+    SECTION("a shared time base replaces the span, and clearing it puts the index back")
+    {
+        REQUIRE(plot.xExtent(line).high == 5.0);
+        plot.setTime(time.data(), count);
+        REQUIRE(plot.xExtent(line).low == 10.0);
+        REQUIRE(plot.xExtent(line).high == 15.0);
+        REQUIRE(plot.xPositiveMinimum(line) == 10.0);
+        plot.setTime(nullptr, 0);
+        REQUIRE(plot.xExtent(line).high == 5.0);
+    }
+    SECTION("a line's own time base beats the shared one it was kept from")
+    {
+        plot.setTime(time.data(), count);
+        REQUIRE(plot.xPositiveMinimum(line) == 10.0);
+        plot.setLineTime(line, own.data(), count);
+        REQUIRE(plot.xExtent(line).low == -20.0);
+        REQUIRE(plot.xExtent(line).high == 8.0);
+        REQUIRE(plot.xPositiveMinimum(line) == 5.0);
+    }
+    SECTION("a line held coarser answers from what it now holds")
+    {
+        // A bucket that straddles zero cannot be opened, so a base coarser
+        // than one answers the smallest above zero with that bucket's largest.
+        const std::vector<double> long_ = [] {
+            std::vector<double> v(1 << 18);
+            for (std::size_t i = 0; i < v.size(); ++i) {
+                v[i] = i % 2 == 0 ? 1.0 + static_cast<double>(i) * 1e-3 : -1.0;
+            }
+            v[1000] = 0.001; // the true smallest, beside a -1 in every bucket
+            return v;
+        }();
+        Plot budgeted;
+        const int held = budgeted.addLine(long_.data(), static_cast<long long>(long_.size()));
+        REQUIRE(budgeted.baseBucket(held) == 1);
+        REQUIRE(budgeted.extent(held).positiveMinimum == 0.001);
+        budgeted.setBudgetBytes(1 << 16);
+        REQUIRE(budgeted.baseBucket(held) > 1);
+        REQUIRE(budgeted.extent(held).positiveMinimum > 0.001);
+    }
+}
+
 TEST_CASE("a line streamed in pieces is the line copied in whole", "[plot]")
 {
     const std::vector<double> values = walk(300001);

@@ -118,6 +118,12 @@ public:
     [[nodiscard]] Span xExtent(int line) const override;
     /// The smallest x of the line above zero, or 0.
     [[nodiscard]] double xPositiveMinimum(int line) const override;
+    /// How many times the three above have had to walk a line or a time base.
+    ///
+    /// A figure asks all three once per line per frame, so each is kept until
+    /// what it was worked out from changes. This is the count that holds them
+    /// to it, because a duration measures the machine.
+    [[nodiscard]] long long wholeLineWalks() const { return wholeLineWalks_; }
 
     /// The line as it is drawn now: a fold of its pyramid for the view and
     /// the pane, with the element of each extreme. Its arrays are the plot's
@@ -153,6 +159,7 @@ private:
     double viewHigh_ = 0.0;
     bool viewSet_ = false;
     bool xLog_ = false;
+    mutable long long wholeLineWalks_ = 0;
 };
 
 } // namespace plotcore
