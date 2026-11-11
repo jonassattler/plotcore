@@ -54,11 +54,23 @@
 // element of the bucket after it, at its own position, when both it and the
 // bucket's own last element are finite -- a chord through a NaN is a line
 // across a gap, which is the one thing a gap must not be. The seam is still an
-// element, so a value of an envelope is still the element at its position. It
-// is not interpolated at the edge, as a fold over pixel columns with edges
-// between the samples would do (the issue's fold.py): on a logarithmic pane,
-// whose columns do fall between samples, the left column takes the whole chord
-// and its last point stands at that next element, just inside the next column.
+// element, so a value of an envelope is still the element at its position.
+// Coarsening stays exact because of that, and a base coarser than one sample
+// is drawn from these seams: a chord that fell inside a bucket cannot be
+// recovered from the bucket.
+//
+// The picture of a base that *is* the samples is the other fold. projectLine
+// lays one column per device pixel on a grid anchored at zero -- at one, on a
+// logarithmic axis -- so a pan of less than a column does not move a sample
+// into another column. A column that holds more than one sample and stands at
+// least a pixel tall is the vertical from its minimum to its maximum, in the
+// middle of the column, and the stroke ends there so it does not run into the
+// next column. Anything shallower is the chord from one edge of the column to
+// the next. The y of that chord is the value between the two samples the edge
+// falls between, and it lengthens the minimum and the maximum of both columns
+// it touches, without counting as another sample. That interpolated edge is
+// the drawing. It is not a level of the pyramid, which is why the seam above
+// is unchanged.
 //
 // The first property survives it, and that is why the seam belongs in the
 // fold rather than in the drawing. The seamed extremes of a union are the

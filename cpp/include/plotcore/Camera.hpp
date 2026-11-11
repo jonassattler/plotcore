@@ -153,7 +153,7 @@ public:
     PaneRect area;
     double maxZoom = 256.0;
     double panKeep = 0.25;
-    /// A band under this many pixels on either side is a slip, not a window.
+    /// A band under this many pixels on a side it takes is a slip, not a window.
     double minimumBand = 12.0;
 
     [[nodiscard]] double viewMinX() const { return x.viewLow(); }
@@ -172,9 +172,11 @@ public:
     /// The four boxes: a window named in values, clipped to what the axes can
     /// draw.
     void setViewRange(double x0, double x1, double y0, double y1);
-    /// The band: the pixels between two corners, refused when either side is
-    /// under minimumBand. The focus is written to `focus` when it moved x.
-    bool zoomToRegion(double px0, double py0, double px1, double py1,
+    /// The band a right drag drew. `axes` is the wheel's choice: across the
+    /// pane, up it, or both. A taken side under minimumBand refuses the band;
+    /// a side that is not taken is left as it was. The focus is written when
+    /// the move changed x.
+    bool zoomToRegion(double px0, double py0, double px1, double py1, ZoomAxes axes,
                       std::optional<GestureFocus>* focus = nullptr);
 
     /// The value under a pane pixel. The band resolves through these, so its

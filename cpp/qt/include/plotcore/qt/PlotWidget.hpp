@@ -66,6 +66,10 @@ signals:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void enterEvent(QEnterEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -76,6 +80,9 @@ protected:
 
 private:
     void applyMeasure();
+    /// A Shift or Ctrl changed while a button is down: tell the figure, which
+    /// otherwise hears modifiers only on a move.
+    void followModifiers();
     void drawText(QPainter& painter, const TextItem& text) const;
     void paintMark(QPainter& painter, const Mark& mark, const QRectF& area) const;
 
@@ -83,6 +90,9 @@ private:
     Scene scene_;
     std::array<QFont, 6> fonts_;
     std::array<bool, 6> fontSet_{};
+    /// showEvent focuses once. A later show leaves the keyboard where the
+    /// reader put it.
+    bool tookFocus_ = false;
 };
 
 } // namespace plotcore::qt

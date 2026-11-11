@@ -1336,8 +1336,10 @@ mod tests {
         figure.set_view(4000.0, 4100.0, 0.0, (1 << 20) as f64).unwrap();
         let scene = figure.scene().unwrap();
         assert!(asked.load(Ordering::SeqCst) > 0);
+        // y is the element. x is that element's device-pixel centre, which is
+        // closer to it than the next sample is.
         for p in &scene.lines[0].values[0] {
-            assert!((p[0] - p[1]).abs() < 1e-6, "every value is its element");
+            assert!((p[0] - p[1]).abs() < 0.5, "x is within half a sample of its element");
         }
         assert_eq!(dropped.load(Ordering::SeqCst), 0);
         figure.remove_line(0).unwrap();

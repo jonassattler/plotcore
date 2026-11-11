@@ -41,9 +41,9 @@ constexpr double kInfinity = std::numeric_limits<double>::infinity();
 // depends on nothing the plot draws.
 //
 // It overestimates by the gutters, which is what the renderer's tolerance
-// for a few points per column is for -- see kSamplesPerColumn. Quantised
-// on the other side, so dragging the window's edge does not re-read the
-// file once a pixel.
+// for a few points per column is for: a column is two stations or a chord.
+// Quantised on the other side, so dragging the window's edge does not
+// re-read the file once a pixel.
 //
 // In *device* pixels, which is the other half of "a bucket is a column".
 // A pane is laid out in logical pixels and drawn into a framebuffer with
@@ -1290,8 +1290,21 @@ Scene Figure::compose(const SceneRequest& request)
                     ? fractionOn(sample.y, window.low, window.high, window.logarithmic, cy.base)
                     : fractionOn(sample.y, cy.viewLow(), cy.viewHigh(), cy.logarithmic, cy.base);
             const bool flipped = settings_.flipped;
-            taken = Taken{position, sample.x, sample.y, (flipped ? up : along) * a.width,
-                          a.height - (flipped ? along : up) * a.height};
+            // The same device-pixel centre the stroke was drawn on, so the
+            // crosshair sits on the sample rather than half a pixel beside it.
+            const double ratio = std::max(pixelRatio_, 1.0);
+            const auto centre = [&](double px) {
+                return (std::floor(px * ratio) + 0.5) / ratio;
+            };
+            double px = (flipped ? up : along) * a.width;
+            double py = a.height - (flipped ? along : up) * a.height;
+            if (flipped) {
+                py = centre(py);
+            }
+            else {
+                px = centre(px);
+            }
+            taken = Taken{position, sample.x, sample.y, px, py};
         }
     }
     if (taken.has_value()) {
@@ -1418,13 +1431,10 @@ Scene Figure::compose(const SceneRequest& request)
         // The band is clamped to the pane rather than merely clipped, because
         // its corners are what the numbers are read out of as well as what the
         // rectangle is drawn from: the band, the numbers beside it and the
-        // window they get on release are one statement about one pair of
-        // points.
-        const double left = std::clamp(std::min(pressed_.x(), last_.x()), a.x, a.x + a.width);
-        const double right = std::clamp(std::max(pressed_.x(), last_.x()), a.x, a.x + a.width);
-        const double topY = std::clamp(std::min(pressed_.y(), last_.y()), a.y, a.y + a.height);
-        const double bottomY = std::clamp(std::max(pressed_.y(), last_.y()), a.y, a.y + a.height);
-        scene.band = PaneRect{left, topY, right - left, bottomY - topY};
+        // window they get on release are one statement. A modifier takes one
+        // direction, and that statement is then the pane's whole extent the
+        // other way: the numbers name the edges the zoom will keep.
+        scene.band = bandRectangle(a);
         scene.over.push_back(boxed(*scene.band, chrome.bandFill, chrome.bandEdge, s.accentWidth,
                                    Mark::Layer::Overlay, 0.0, true));
         if (settings_.bandReadout) {
@@ -1454,6 +1464,22 @@ Scene Figure::compose(const SceneRequest& request)
     return scene;
 }
 
+PaneRect Figure::bandRectangle(const PaneRect& area) const
+{
+    const double left = std::clamp(std::min(pressed_.x(), last_.x()), area.x, area.x + area.width);
+    const double right = std::clamp(std::max(pressed_.x(), last_.x()), area.x, area.x + area.width);
+    const double top = std::clamp(std::min(pressed_.y(), last_.y()), area.y, area.y + area.height);
+    const double bottom =
+        std::clamp(std::max(pressed_.y(), last_.y()), area.y, area.y + area.height);
+    if (bandAxes_ == ZoomAxes::X) {
+        return {left, area.y, right - left, area.height};
+    }
+    if (bandAxes_ == ZoomAxes::Y) {
+        return {area.x, top, area.width, bottom - top};
+    }
+    return {left, top, right - left, bottom - top};
+}
+
 void Figure::bandReadout(Scene& scene, const Layout& lay) const
 {
     // PlotBand.qml. The band on its own says *where* the reader is about to
@@ -1461,7 +1487,11 @@ void Figure::bandReadout(Scene& scene, const Layout& lay) const
     // one over the second half of a pulse is choosing an interval, and the
     // interval is the thing they want written down: where the drag started,
     // where it has reached, and how wide and how tall it has become by now.
-    // Those are the four numbers the axes are about to be set to.
+    // Those are the four numbers the axes are about to be set to. A modifier
+    // takes one of those directions, the same choice the wheel makes. The
+    // rectangle is then the pane's whole extent the other way, and the numbers
+    // are that axis's two edges and the span between them: a second number
+    // would name an axis the zoom is about to leave alone.
     //
     // They are asked of the camera rather than worked out again -- dataXAt
     // and dataYAt are what zoomToRegion resolves the band itself with. A
@@ -1492,8 +1522,10 @@ void Figure::bandReadout(Scene& scene, const Layout& lay) const
     const double startY = paneY(pressed_.y());
     const double endX = paneX(last_.x());
     const double endY = paneY(last_.y());
-    const PaneRect bandRect{std::min(startX, endX), std::min(startY, endY), std::abs(endX - startX),
-                            std::abs(endY - startY)};
+    // The rectangle that is drawn, in the pane's own pixels. On one axis it
+    // fills the pane the other way, and the numbers are kept off that.
+    const PaneRect absolute = bandRectangle(a);
+    const PaneRect bandRect{absolute.x - a.x, absolute.y - a.y, absolute.width, absolute.height};
 
     // ...and in the axes' own numbers. Both coordinates of each corner go to
     // both questions, because on a flipped pane x is read off the height.
@@ -1520,15 +1552,25 @@ void Figure::bandReadout(Scene& scene, const Layout& lay) const
     // does not read as one more coordinate -- and not U+0394, which the mono
     // face the viewer ships does not carry.
     const std::string increment = "\xE2\x88\x86";
-    const std::string startText = coordinate(startValueX, startValueY);
-    const std::string endText = coordinate(endValueX, endValueY);
+    std::string startText = coordinate(startValueX, startValueY);
+    std::string endText = coordinate(endValueX, endValueY);
     const std::string xSpan = increment + xNumber(std::abs(endValueX - startValueX));
     const std::string ySpan =
         lay.common ? increment + yNumber(std::abs(endValueY - startValueY)) : std::string();
     // The band's width is a length of whichever axis runs across the pane,
     // which on a flipped one is y.
-    const std::string widthText = settings_.flipped ? ySpan : xSpan;
-    const std::string heightText = settings_.flipped ? xSpan : ySpan;
+    std::string widthText = settings_.flipped ? ySpan : xSpan;
+    std::string heightText = settings_.flipped ? xSpan : ySpan;
+    if (bandAxes_ == ZoomAxes::X) {
+        startText = settings_.flipped ? yNumber(startValueY) : xNumber(startValueX);
+        endText = settings_.flipped ? yNumber(endValueY) : xNumber(endValueX);
+        heightText.clear();
+    }
+    else if (bandAxes_ == ZoomAxes::Y) {
+        startText = settings_.flipped ? xNumber(startValueX) : yNumber(startValueY);
+        endText = settings_.flipped ? xNumber(endValueX) : yNumber(endValueY);
+        widthText.clear();
+    }
 
     // The air between a number and whatever it is kept off: one distance for
     // the band, the pane's edge and another number, because they are one rule.
@@ -1598,11 +1640,27 @@ void Figure::bandReadout(Scene& scene, const Layout& lay) const
     std::vector<Placed> placed;
     // Diagonally opposite corners, so the two pushes are exact opposites --
     // which holds the two coordinates apart when the band is small enough
-    // that they would otherwise meet.
-    const double runsRight = endX >= startX ? 1.0 : -1.0;
-    const double runsDown = endY >= startY ? 1.0 : -1.0;
-    const PaneRect startBox = place(startX, startY, -runsRight, -runsDown, boxFor(startText));
-    const PaneRect endBox = place(endX, endY, runsRight, runsDown, boxFor(endText));
+    // that they would otherwise meet. One axis has no diagonal: its two
+    // edges are the two ends of the side being taken, and each number is
+    // pushed off that side.
+    PaneRect startBox;
+    PaneRect endBox;
+    if (bandAxes_ == ZoomAxes::X) {
+        const bool startLeft = startX <= endX;
+        startBox = place(startX, bandRect.y, startLeft ? -1.0 : 1.0, 1.0, boxFor(startText));
+        endBox = place(endX, bandRect.y, startLeft ? 1.0 : -1.0, 1.0, boxFor(endText));
+    }
+    else if (bandAxes_ == ZoomAxes::Y) {
+        const bool startAbove = startY <= endY;
+        startBox = place(bandRect.x, startY, 1.0, startAbove ? -1.0 : 1.0, boxFor(startText));
+        endBox = place(bandRect.x, endY, 1.0, startAbove ? 1.0 : -1.0, boxFor(endText));
+    }
+    else {
+        const double runsRight = endX >= startX ? 1.0 : -1.0;
+        const double runsDown = endY >= startY ? 1.0 : -1.0;
+        startBox = place(startX, startY, -runsRight, -runsDown, boxFor(startText));
+        endBox = place(endX, endY, runsRight, runsDown, boxFor(endText));
+    }
     placed.push_back(Placed{BandLabel{"start", startText, {}, 0.0}, startBox});
     placed.push_back(Placed{BandLabel{"end", endText, {}, 0.0}, endBox});
 
@@ -1642,10 +1700,46 @@ void Figure::bandReadout(Scene& scene, const Layout& lay) const
                    PaneRect{bandRect.x + bandRect.width + gap, midY - heightSize.height / 2.0,
                             heightSize.width, heightSize.height}});
     }
+    bool placedWidth = false;
+    bool placedHeight = false;
     for (const Placed& candidate : candidates) {
         if (inside(candidate.box) && clears(candidate.box, startBox) &&
             clears(candidate.box, endBox)) {
+            placedWidth = placedWidth || candidate.label.key.starts_with("width");
+            placedHeight = placedHeight || candidate.label.key.starts_with("height");
             placed.push_back(candidate);
+        }
+    }
+    // A one-axis band fills the pane the other way, so the span has no
+    // outside to stand in. It stands on the band, which is a veil, where it
+    // is still clear of the two edges and of the pointer.
+    const auto onBand = [&](const std::string& key, const std::string& text, const PaneRect& spot,
+                            double turn) {
+        if (inside(spot) && clears(spot, startBox) && clears(spot, endBox) &&
+            clears(spot, pointer)) {
+            placed.push_back(Placed{BandLabel{key, text, {}, turn}, spot});
+            return true;
+        }
+        return false;
+    };
+    if (bandAxes_ == ZoomAxes::X && !placedWidth && !widthText.empty() &&
+        widthSize.width <= bandRect.width) {
+        const PaneRect size = widthSize;
+        const PaneRect along{midX - size.width / 2.0, bandRect.y + gap, size.width, size.height};
+        const PaneRect mid{midX - size.width / 2.0, midY - size.height / 2.0, size.width,
+                           size.height};
+        if (!onBand("width", widthText, along, 0.0)) {
+            onBand("width", widthText, mid, 0.0);
+        }
+    }
+    if (bandAxes_ == ZoomAxes::Y && !placedHeight && !heightText.empty() &&
+        heightSize.height <= bandRect.height) {
+        const PaneRect beside{bandRect.x + gap, midY - heightSize.height / 2.0, heightSize.width,
+                              heightSize.height};
+        const PaneRect mid{midX - heightSize.width / 2.0, midY - heightSize.height / 2.0,
+                           heightSize.width, heightSize.height};
+        if (!onBand("height", heightText, beside, -90.0)) {
+            onBand("height", heightText, mid, -90.0);
         }
     }
 
@@ -1926,6 +2020,7 @@ void Figure::press(double px, double py, Button button, Modifiers modifiers)
     dragLine_ = -1;
     if (button == Button::Right) {
         drag_ = Drag::Band;
+        bandAxes_ = zoomAxesFor(modifiers.shift, modifiers.control);
         return;
     }
     if (settings_.lineGestures &&
@@ -1938,12 +2033,15 @@ void Figure::press(double px, double py, Button button, Modifiers modifiers)
     drag_ = Drag::Pan;
 }
 
-void Figure::move(double px, double py, Modifiers)
+void Figure::move(double px, double py, Modifiers modifiers)
 {
     const Point at(px, py);
     pointer_ = at;
     if (drag_ == Drag::None) {
         return;
+    }
+    if (drag_ == Drag::Band) {
+        bandAxes_ = zoomAxesFor(modifiers.shift, modifiers.control);
     }
     const double dx = px - last_.x();
     const double dy = py - last_.y();
@@ -1963,7 +2061,7 @@ void Figure::move(double px, double py, Modifiers)
     last_ = at;
 }
 
-void Figure::release(double px, double py, Button button, Modifiers)
+void Figure::release(double px, double py, Button button, Modifiers modifiers)
 {
     last_ = Point(px, py);
     if (drag_ == Drag::Band && button == Button::Right) {
@@ -1971,8 +2069,12 @@ void Figure::release(double px, double py, Button button, Modifiers)
         banding_ = false;
         // A stated region is a reader who has already said where they are
         // going, so it is said to the lines too (PlotSurface.zoomToRegion).
+        // The keys at release are the ones that choose the axis, as they are
+        // for the wheel.
         std::optional<GestureFocus> focus;
-        if (camera_.zoomToRegion(pressed_.x(), pressed_.y(), px, py, &focus) && focus.has_value()) {
+        const ZoomAxes axes = zoomAxesFor(modifiers.shift, modifiers.control);
+        if (camera_.zoomToRegion(pressed_.x(), pressed_.y(), px, py, axes, &focus) &&
+            focus.has_value()) {
             source().focus(*focus);
         }
         return;

@@ -3,7 +3,11 @@
 
 #include "plotcore/qt/PlotWidget.hpp"
 
+#include <QCursor>
+#include <QEnterEvent>
 #include <QFontMetricsF>
+#include <QGuiApplication>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -27,6 +31,11 @@ QPointF qpoint(const Point& point)
 
 Modifiers modifiersOf(Qt::KeyboardModifiers keys)
 {
+    // The event carries the modifiers Qt last heard. A Shift held down before
+    // this widget had the keyboard is not among them, so a gesture would
+    // ignore it until a click gave the plot the focus. The platform is asked
+    // as well, which is the keys actually down.
+    keys |= QGuiApplication::queryKeyboardModifiers();
     return Modifiers{keys.testFlag(Qt::ShiftModifier), keys.testFlag(Qt::ControlModifier),
                      keys.testFlag(Qt::AltModifier)};
 }
@@ -100,6 +109,59 @@ void PlotWidget::changeEvent(QEvent* event)
         update();
     }
     QWidget::changeEvent(event);
+}
+
+void PlotWidget::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    // A window that opens under the pointer never gets an enter. The plot
+    // takes the keyboard then, so a dock's first box does not keep it.
+    if (!tookFocus_) {
+        tookFocus_ = true;
+        setFocus(Qt::OtherFocusReason);
+    }
+}
+
+void PlotWidget::enterEvent(QEnterEvent* event)
+{
+    // Shift and Ctrl are this plot's gestures. They arrive only at the widget
+    // that has the keyboard, so the pointer arriving is enough and a click is
+    // not required first.
+    setFocus(Qt::MouseFocusReason);
+    QWidget::enterEvent(event);
+}
+
+void PlotWidget::followModifiers()
+{
+    if (QGuiApplication::mouseButtons() == Qt::NoButton) {
+        return;
+    }
+    const QPoint at = mapFromGlobal(QCursor::pos());
+    if (!rect().contains(at)) {
+        return;
+    }
+    figure_.move(at.x(), at.y(), modifiersOf(QGuiApplication::queryKeyboardModifiers()));
+    update();
+}
+
+void PlotWidget::keyPressEvent(QKeyEvent* event)
+{
+    const int key = event->key();
+    if (!event->isAutoRepeat() &&
+        (key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt)) {
+        followModifiers();
+    }
+    QWidget::keyPressEvent(event);
+}
+
+void PlotWidget::keyReleaseEvent(QKeyEvent* event)
+{
+    const int key = event->key();
+    if (!event->isAutoRepeat() &&
+        (key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt)) {
+        followModifiers();
+    }
+    QWidget::keyReleaseEvent(event);
 }
 
 void PlotWidget::resizeEvent(QResizeEvent* event)
@@ -306,6 +368,7 @@ void PlotWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
     const QPointF at = event->position();
+    setFocus(Qt::MouseFocusReason);
     figure_.press(at.x(), at.y(), *button, modifiersOf(event->modifiers()));
     event->accept();
     update();

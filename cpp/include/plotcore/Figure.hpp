@@ -381,8 +381,11 @@ struct LegendEntry
 
 /// One of the numbers a band being drawn writes beside itself: a corner
 /// ("start", "end") or a length ("widthAbove", "widthBelow", "heightLeft",
-/// "heightRight"), in the box it is drawn in and turned by `turn` degrees.
-/// What PlotBand.labels was, so a test can hold the layout to its rules.
+/// "heightRight"). A band that takes one axis writes "width" or "height"
+/// for the span that has to stand on the band, because the band fills the
+/// pane the other way and there is no outside left to stand in. In the box
+/// it is drawn in and turned by `turn` degrees. What PlotBand.labels was, so
+/// a test can hold the layout to its rules.
 struct BandLabel
 {
     std::string key;
@@ -589,9 +592,11 @@ public:
     /// 120 is one notch. Shift is x, Control is y; Alt and Control together
     /// scale the line under the pointer and nothing else.
     void wheel(double px, double py, double angleDelta, Modifiers modifiers);
-    /// Left drags the view; right draws a band to zoom to; middle, or left
-    /// with Alt, moves the line under the pointer up and down its axis.
-    /// Control and a left click puts that line back.
+    /// Left drags the view; right draws a band to zoom to. Shift on that drag
+    /// zooms across the pane only and Control up it only, the wheel's choice,
+    /// and the band fills the pane the other way. Middle, or left with Alt,
+    /// moves the line under the pointer up and down its axis. Control and a
+    /// left click puts that line back.
     void press(double px, double py, Button button, Modifiers modifiers);
     void move(double px, double py, Modifiers modifiers);
     void release(double px, double py, Button button, Modifiers modifiers);
@@ -655,6 +660,9 @@ private:
     [[nodiscard]] Scene compose(const SceneRequest& request);
     /// The numbers a band being drawn writes beside itself (PlotBand.qml).
     void bandReadout(Scene& scene, const Layout& layout) const;
+    /// The rectangle a band in progress draws. Both axes: the pointer's
+    /// corners. One axis: the pane's whole extent the other way.
+    [[nodiscard]] PaneRect bandRectangle(const PaneRect& area) const;
     /// `text` cut to `width` in `role`'s face, with an ellipsis at its end
     /// or, `middle`, in its middle -- as Qt elides a Text.
     [[nodiscard]] std::string elided(const std::string& text, double width, TextRole role,
@@ -702,6 +710,9 @@ private:
     bool moved_ = false;
     /// Whether a right press has gone far enough to be a band.
     bool banding_ = false;
+    /// Which pane directions the band in progress will zoom. The wheel's
+    /// choice, from the modifiers of the latest move.
+    ZoomAxes bandAxes_ = ZoomAxes::Both;
     bool controlClick_ = false;
     std::optional<Point> pointer_;
 };

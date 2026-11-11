@@ -196,8 +196,8 @@ bool RunLadder::refresh(const PyramidOf& pyramidOf)
     // file to gain a fraction of an octave would have been a round trip spent
     // on almost nothing. The cost of settling for it is that the pane can be
     // drawn at up to an octave coarser than it asked -- about one drawn station
-    // per column where it asked for two, which is what kSamplesPerColumn's
-    // slack absorbs.
+    // per column where it asked for two, which a column of two stations
+    // absorbs.
     //
     // Out of a held line that trade has no second side. The finer run is a fold
     // of a buffer already in hand, so there is nothing to weigh against it, and
