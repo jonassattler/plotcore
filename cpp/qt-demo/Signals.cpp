@@ -125,6 +125,93 @@ std::vector<double> irregularTime(long long count, unsigned seed)
 
 // --- files --------------------------------------------------------------------
 
+namespace {
+
+/// A normal draw, by Box and Muller from two of the walk's.
+double normal(Lcg& random)
+{
+    const double u = std::max(random.next(), 1e-12);
+    const double v = random.next();
+    return std::sqrt(-2.0 * std::log(u)) * std::cos(2.0 * std::numbers::pi * v);
+}
+
+} // namespace
+
+Cloud gaussianCloud(long long count, unsigned seed)
+{
+    Cloud out;
+    out.name = "cloud of " + std::to_string(count);
+    Lcg random{seed};
+    out.x.resize(static_cast<std::size_t>(count));
+    out.y.resize(static_cast<std::size_t>(count));
+    out.values.resize(static_cast<std::size_t>(count));
+    for (std::size_t i = 0; i < out.x.size(); ++i) {
+        const double a = normal(random);
+        const double b = normal(random);
+        out.x[i] = a;
+        out.y[i] = 0.6 * a + 0.8 * b;
+        out.values[i] = std::hypot(a, b);
+    }
+    return out;
+}
+
+Cloud clusters(long long count, unsigned seed)
+{
+    Cloud out;
+    out.name = "clusters";
+    Lcg random{seed};
+    constexpr int kClusters = 40;
+    double cx[kClusters];
+    double cy[kClusters];
+    double spread[kClusters];
+    for (int k = 0; k < kClusters; ++k) {
+        cx[k] = 20.0 * random.next();
+        cy[k] = 10.0 * random.next();
+        spread[k] = 0.02 + 0.5 * random.next() * random.next();
+    }
+    out.x.resize(static_cast<std::size_t>(count));
+    out.y.resize(static_cast<std::size_t>(count));
+    out.values.resize(static_cast<std::size_t>(count));
+    for (std::size_t i = 0; i < out.x.size(); ++i) {
+        const int k = static_cast<int>(random.next() * (kClusters - 1));
+        // Every hundredth point of a cluster on its very centre: the duplicates.
+        const bool centre = i % 100 == 0;
+        out.x[i] = cx[k] + (centre ? 0.0 : spread[k] * normal(random));
+        out.y[i] = cy[k] + (centre ? 0.0 : spread[k] * normal(random));
+        out.values[i] = k;
+    }
+    return out;
+}
+
+Cloud spiral(long long count)
+{
+    Cloud out;
+    out.name = "spiral";
+    Lcg random{99};
+    out.x.resize(static_cast<std::size_t>(count));
+    out.y.resize(static_cast<std::size_t>(count));
+    out.rgba.resize(4 * static_cast<std::size_t>(count));
+    for (std::size_t i = 0; i < out.x.size(); ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(count);
+        const double angle = 12.0 * std::numbers::pi * t;
+        const double radius = t * (1.0 + 0.06 * normal(random));
+        out.x[i] = radius * std::cos(angle);
+        out.y[i] = radius * std::sin(angle);
+        // Round the hues, as a host colouring by labels of its own would.
+        const double hue = 6.0 * t;
+        const auto channel = [&](double offset) {
+            const double h = std::fmod(hue + offset, 6.0);
+            const double v = std::clamp(std::min(h, 4.0 - h), 0.0, 1.0);
+            return static_cast<std::uint8_t>(std::lround(255.0 * v));
+        };
+        out.rgba[4 * i] = channel(2.0);
+        out.rgba[4 * i + 1] = channel(0.0);
+        out.rgba[4 * i + 2] = channel(4.0);
+        out.rgba[4 * i + 3] = 255;
+    }
+    return out;
+}
+
 std::optional<std::vector<Signal>> loadNpy(const std::string& path, std::string& error)
 {
     std::ifstream file(path, std::ios::binary);

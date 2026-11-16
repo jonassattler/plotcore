@@ -49,9 +49,12 @@ private:
     QWidget* axesPanel();
     QWidget* linesPanel();
     QWidget* viewPanel();
+    QWidget* pointsPanel();
 
     void addSignal(int which);
+    void addPoints(int which);
     void addLine(const std::string& name, const std::vector<double>& values);
+    void refreshSelection();
     void openFile();
     void startStream();
     void streamStep();
@@ -81,6 +84,7 @@ private:
 
     // Data.
     QComboBox* signal_ = nullptr;
+    QComboBox* cloud_ = nullptr;
     QComboBox* xAxis_ = nullptr;
     QComboBox* appetite_ = nullptr;
     QPushButton* stream_ = nullptr;
@@ -125,6 +129,16 @@ private:
     QCheckBox* dark_ = nullptr;
     QCheckBox* paper_ = nullptr;
     QTableWidget* lines_ = nullptr;
+
+    // Points.
+    QComboBox* pointDrawing_ = nullptr;
+    QComboBox* colourMap_ = nullptr;
+    QCheckBox* colourReversed_ = nullptr;
+    QCheckBox* colourLog_ = nullptr;
+    QCheckBox* colourBar_ = nullptr;
+    QLineEdit* colourLabel_ = nullptr;
+    QCheckBox* pointGestures_ = nullptr;
+    QLabel* selected_ = nullptr;
 
     // View.
     QDoubleSpinBox* viewBox_[4] = {};

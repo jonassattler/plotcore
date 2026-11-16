@@ -21,7 +21,7 @@ mod signals;
 use std::f64::consts::E;
 
 use egui::{Color32, ComboBox, DragValue, Ui};
-use plotcore::{Appetite, Figure, Rgba};
+use plotcore::{Appetite, Figure, LineKind, Rgba};
 use plotcore_egui::{PlotView, Strokes};
 
 const GRIDS: [&str; 4] = ["none", "loose", "dense", "custom"];
@@ -39,6 +39,7 @@ struct Stream {
 pub struct DemoApp {
     view: PlotView,
     signal: usize,
+    cloud: usize,
     x_axis: usize,
     appetite: Appetite,
     line_times: Vec<usize>,
@@ -132,6 +133,7 @@ impl DemoApp {
         let mut app = Self {
             view: PlotView::new(Figure::new()),
             signal: 0,
+            cloud: 0,
             x_axis: 0,
             appetite: Appetite::Medium,
             line_times: Vec::new(),
@@ -161,6 +163,19 @@ impl DemoApp {
         let seed = self.view.figure.line_count() as u32 + 1;
         let signal = signals::make(which, seed);
         self.add_line(&signal.name, &signal.values);
+    }
+
+    fn add_points(&mut self, which: usize) {
+        let cloud = signals::make_cloud(which);
+        let figure = self.figure();
+        let Ok(line) = figure.add_points(&cloud.x, &cloud.y, &cloud.name) else { return };
+        if let Some(values) = &cloud.values {
+            let _ = figure.set_point_values(line, Some(values));
+        }
+        if let Some(rgba) = &cloud.rgba {
+            let _ = figure.set_point_colours(line, Some(rgba));
+        }
+        self.line_times.push(0);
     }
 
     fn add_every_signal(&mut self) {
@@ -231,6 +246,19 @@ impl DemoApp {
             );
             if ui.button("Add").clicked() {
                 self.add_signal(self.signal);
+            }
+        });
+        ui.horizontal(|ui| {
+            ComboBox::from_id_salt("cloud").selected_text(signals::CLOUDS[self.cloud]).show_ui(
+                ui,
+                |ui| {
+                    for (i, name) in signals::CLOUDS.iter().enumerate() {
+                        ui.selectable_value(&mut self.cloud, i, *name);
+                    }
+                },
+            );
+            if ui.button("Add points").clicked() {
+                self.add_points(self.cloud);
             }
         });
         if ui
@@ -389,6 +417,45 @@ impl DemoApp {
         self.lines_table(ui);
     }
 
+    fn points_panel(&mut self, ui: &mut Ui) {
+        let figure = &mut self.view.figure;
+        ui.horizontal(|ui| {
+            ui.label("drawn as");
+            let current = figure.get_text("pointDrawing").unwrap_or_default();
+            for name in ["adaptive", "markers", "image"] {
+                let chosen = ui.selectable_label(current == name, name).on_hover_text(
+                    "markers: a dot a point drawn, painted here. image: plotcore paints the \
+                     pane's pixels. adaptive: markers while a scatter is sparse.",
+                );
+                if chosen.clicked() {
+                    let _ = figure.set_text("pointDrawing", name);
+                }
+            }
+        });
+        let ramps = plotcore::ramp_names();
+        choice(ui, figure, "colourMap", "colour axis", &ramps);
+        ui.horizontal(|ui| {
+            toggle(ui, figure, "colourReversed", "reversed");
+            toggle(ui, figure, "colourLog", "logarithmic");
+            toggle(ui, figure, "colourBar", "bar");
+        });
+        text(ui, figure, "colourLabel", "its name");
+        toggle(ui, figure, "pointGestures", "a click and a Shift-band select");
+        let said: Vec<String> = (0..figure.line_count())
+            .filter(|&line| figure.line_kind(line) == LineKind::Points)
+            .filter_map(|line| {
+                let count = figure.selection(line).map(|s| s.len()).unwrap_or(0);
+                (count > 0).then(|| {
+                    format!("{}: {count} selected", figure.line_name(line).unwrap_or_default())
+                })
+            })
+            .collect();
+        ui.label(if said.is_empty() { "nothing selected".to_owned() } else { said.join("; ") });
+        if ui.button("Clear the selection").clicked() {
+            let _ = figure.clear_selection();
+        }
+    }
+
     fn lines_table(&mut self, ui: &mut Ui) {
         self.line_times.resize(self.view.figure.line_count().max(0) as usize, 0);
         egui::Grid::new("lines").striped(true).show(ui, |ui| {
@@ -432,6 +499,16 @@ impl DemoApp {
                     if ui.add(DragValue::new(&mut value).speed(speed)).changed() {
                         let _ = figure.set_line_number(line, name, value);
                     }
+                }
+                if figure.line_kind(line) == LineKind::Points {
+                    // A scatter's x is its own, and it takes no time base.
+                    ui.label("its own x");
+                    if ui.small_button("put back").clicked() {
+                        let _ = figure.set_line_number(line, "scale", 1.0);
+                        let _ = figure.set_line_number(line, "shift", 0.0);
+                    }
+                    ui.end_row();
+                    continue;
                 }
                 let mut mode = self.line_times[line as usize];
                 ComboBox::from_id_salt(("time", line)).selected_text(TIMES[mode]).show_ui(
@@ -518,9 +595,22 @@ impl DemoApp {
         if let Some(reading) = self.view.last_scene().and_then(|s| s.reading.as_ref()) {
             let name = figure.line_name(reading.line).unwrap_or_default();
             line += &format!("   —   {name}: x {}, y {}", reading.x_text, reading.y_text);
+            if reading.element >= 0 {
+                line += &format!(" (#{})", reading.element);
+            }
+            if !reading.value_text.is_empty() {
+                line += &format!(", value {}", reading.value_text);
+            }
         }
-        let bases: Vec<String> =
-            (0..figure.line_count()).map(|i| figure.line_base_bucket(i).to_string()).collect();
+        let bases: Vec<String> = (0..figure.line_count())
+            .map(|i| {
+                if figure.line_kind(i) == LineKind::Points {
+                    "points".to_owned()
+                } else {
+                    figure.line_base_bucket(i).to_string()
+                }
+            })
+            .collect();
         line += &format!(
             "   held {:.1} of {:.0} MB, base buckets {}",
             figure.held_bytes() as f64 / 1048576.0,
@@ -553,6 +643,9 @@ impl DemoApp {
                 egui::CollapsingHeader::new("Lines")
                     .default_open(true)
                     .show(ui, |ui| self.lines_panel(ui));
+                egui::CollapsingHeader::new("Points")
+                    .default_open(true)
+                    .show(ui, |ui| self.points_panel(ui));
                 egui::CollapsingHeader::new("View")
                     .default_open(true)
                     .show(ui, |ui| self.view_panel(ui));
@@ -869,6 +962,64 @@ mod self_test {
         }
         let scene = walk.frame(vec![]);
         walk.check(scene.lines.len() == 9, "a line streamed in pieces is drawn once it is whole");
+
+        // Scatters: a million points drawn as an image of the pane; a spiral of
+        // colours of its own as markers; a click that selects; a band that
+        // selects; and the colour axis drawn as a bar.
+        walk.app.view.figure.clear().unwrap();
+        walk.app.line_times.clear();
+        walk.app.add_points(0);
+        walk.app.add_points(3);
+        walk.app.view.figure.set_text("colourLabel", "radius").unwrap();
+        let points = walk.frame(vec![]);
+        walk.check(
+            points.lines.len() == 2 && points.lines[0].kind == LineKind::Points,
+            "a scatter of a million points is drawn",
+        );
+        walk.check(points.lines[0].image.is_some(), "...as an image of the pane");
+        walk.check(points.colour_axis.is_some(), "...coloured through the colour axis, as a bar");
+        walk.app.view.figure.set_text("pointDrawing", "markers").unwrap();
+        walk.app.view.figure.set_view(-0.2, 0.2, -0.2, 0.2).unwrap();
+        let dotted = walk.frame(vec![]);
+        let spiral = &dotted.lines[1];
+        walk.check(
+            !spiral.markers.is_empty() && spiral.marker_colours.len() == spiral.markers.len(),
+            "a spiral of colours of its own, as markers",
+        );
+        let [dx, dy] = spiral.markers[spiral.markers.len() / 2];
+        let dot = walk.app.plot_rect.min + Vec2::new(dx as f32, dy as f32);
+        walk.drag(dot, dot, PointerButton::Primary, Modifiers::NONE);
+        let chosen = (0..2)
+            .map(|line| walk.app.view.figure.selection(line).map(|s| s.len()).unwrap_or(0))
+            .sum::<usize>();
+        walk.check(chosen == 1, "a click selects the point under it");
+        let said = walk.app.view.selection_changed();
+        walk.check(said, "...and says so");
+        walk.app.view.figure.reset_view().unwrap();
+        let whole = walk.frame(vec![]);
+        let at = |fx: f64, fy: f64| {
+            walk.app.plot_rect.min
+                + Vec2::new(
+                    (whole.area.x + whole.area.width * fx) as f32,
+                    (whole.area.y + whole.area.height * fy) as f32,
+                )
+        };
+        let (from, to) = (at(0.4, 0.4), at(0.6, 0.6));
+        walk.drag(from, to, PointerButton::Secondary, Modifiers::SHIFT);
+        let after = walk.frame(vec![]);
+        walk.check(
+            walk.app.view.figure.selection(0).map(|s| s.len()).unwrap_or(0) > 1000
+                && after.view == whole.view,
+            "Shift and a right drag select what the band holds, and zoom nothing",
+        );
+        walk.app.view.figure.set_bool("flipped", true).unwrap();
+        let flipped = walk.frame(vec![]).lines.len();
+        walk.check(flipped == 2, "scatters flipped");
+        walk.app.view.figure.set_bool("flipped", false).unwrap();
+        walk.app.view.figure.set_text("pointDrawing", "adaptive").unwrap();
+        walk.app.add_every_signal();
+        let both = walk.frame(vec![]).lines.len();
+        walk.check(both == 8, "scatters and lines on one pane");
 
         println!("{}", if walk.failed == 0 { "all checks passed" } else { "checks failed" });
         walk.failed

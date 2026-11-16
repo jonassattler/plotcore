@@ -8,11 +8,22 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
 Signal = Tuple[str, np.ndarray]
+
+
+class Cloud(NamedTuple):
+    """Points to scatter: an x and a y each, and what each is coloured by -- a
+    value through the colour axis, or a colour of its own -- when it is."""
+
+    name: str
+    x: np.ndarray
+    y: np.ndarray
+    values: Optional[np.ndarray] = None
+    rgba: Optional[np.ndarray] = None
 
 
 def spiked_sine(count: int = 200_000) -> Signal:
@@ -67,6 +78,50 @@ SIGNALS = [
     ("Twelve decades", many_decades),
     ("Random walk", random_walk),
     ("Ten million samples", ten_million),
+]
+
+
+def gaussian_cloud(count: int, seed: int) -> Cloud:
+    """Two correlated bells, coloured by how far each point is from the middle."""
+    rng = np.random.default_rng(seed)
+    a = rng.standard_normal(count)
+    b = rng.standard_normal(count)
+    return Cloud(f"cloud of {count}", a, 0.6 * a + 0.8 * b, np.hypot(a, b))
+
+
+def clusters(count: int = 3_000_000, seed: int = 7) -> Cloud:
+    """A few dozen clusters of every size, with points that stand at one place
+    thousands of times over: what a tree must not walk point by point."""
+    rng = np.random.default_rng(seed)
+    centres = rng.random((40, 2)) * [20.0, 10.0]
+    spread = 0.02 + 0.5 * rng.random(40) * rng.random(40)
+    which = rng.integers(0, 40, count)
+    offsets = rng.standard_normal((count, 2)) * spread[which, None]
+    offsets[::100] = 0.0  # every hundredth on its cluster's very centre
+    points = centres[which] + offsets
+    return Cloud("clusters", points[:, 0], points[:, 1], which.astype(np.float64))
+
+
+def spiral(count: int = 200_000) -> Cloud:
+    """A spiral whose points each carry a colour of their own, round the hues."""
+    rng = np.random.default_rng(99)
+    t = np.arange(count) / count
+    angle = 12.0 * np.pi * t
+    radius = t * (1.0 + 0.06 * rng.standard_normal(count))
+    hue = 6.0 * t
+    rgba = np.empty((count, 4), dtype=np.uint8)
+    for channel, offset in enumerate((2.0, 0.0, 4.0)):
+        h = np.fmod(hue + offset, 6.0)
+        rgba[:, channel] = np.rint(255 * np.clip(np.minimum(h, 4.0 - h), 0.0, 1.0))
+    rgba[:, 3] = 255
+    return Cloud("spiral", radius * np.cos(angle), radius * np.sin(angle), rgba=rgba)
+
+
+CLOUDS = [
+    ("Cloud, a million points", lambda: gaussian_cloud(1_000_000, 3)),
+    ("Cloud, ten million points", lambda: gaussian_cloud(10_000_000, 5)),
+    ("Clusters, three million points", clusters),
+    ("Spiral, 200 000 points of their own colours", spiral),
 ]
 
 

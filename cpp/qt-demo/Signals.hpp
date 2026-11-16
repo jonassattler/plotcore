@@ -6,6 +6,7 @@
 // What the example plots: signals made to show one thing each, and the two
 // file formats a reader is most likely to have a line in.
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,6 +32,25 @@ Signal manyDecades(long long count);
 Signal randomWalk(long long count, unsigned seed);
 /// Ten million samples of a chirp with noise and spikes in it.
 Signal tenMillion();
+
+/// Points to scatter: an x and a y each, and what each is coloured by -- a
+/// value through the colour axis, or a colour of its own -- when it is.
+struct Cloud
+{
+    std::string name;
+    std::vector<double> x;
+    std::vector<double> y;
+    std::vector<double> values;
+    std::vector<std::uint8_t> rgba;
+};
+
+/// Two correlated bells, coloured by how far each point is from the middle.
+Cloud gaussianCloud(long long count, unsigned seed);
+/// A few dozen clusters of every size, with points that stand at one place
+/// thousands of times over: what a tree must not walk point by point.
+Cloud clusters(long long count, unsigned seed);
+/// A spiral whose points each carry a colour of their own, round the hues.
+Cloud spiral(long long count);
 
 /// A time base that only goes one way, at a steady rate...
 std::vector<double> regularTime(long long count, double step);

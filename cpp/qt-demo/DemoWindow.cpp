@@ -64,6 +64,13 @@ const char* const kSignals[] = {
     "Ten million samples",
 };
 
+const char* const kClouds[] = {
+    "Cloud, a million points",
+    "Cloud, ten million points",
+    "Clusters, three million points",
+    "Spiral, 200 000 points of their own colours",
+};
+
 const char* const kGrids[] = {"none", "loose", "dense", "custom"};
 const char* const kCorners[] = {"top-left", "top-right", "bottom-left", "bottom-right"};
 
@@ -127,6 +134,7 @@ DemoWindow::DemoWindow(QWidget* parent) : QMainWindow(parent)
     tabs->addTab(dataPanel(), QStringLiteral("Data"));
     tabs->addTab(axesPanel(), QStringLiteral("Axes"));
     tabs->addTab(linesPanel(), QStringLiteral("Lines"));
+    tabs->addTab(pointsPanel(), QStringLiteral("Points"));
     tabs->addTab(viewPanel(), QStringLiteral("View"));
     auto* scroll = new QScrollArea;
     scroll->setWidget(tabs);
@@ -146,6 +154,8 @@ DemoWindow::DemoWindow(QWidget* parent) : QMainWindow(parent)
         refreshViewBoxes();
         refreshStatus();
     });
+    connect(plot_, &plotcore::qt::PlotWidget::selectionChanged, this,
+            &DemoWindow::refreshSelection);
     // The reading follows the pointer, which is a repaint and not a change.
     auto* readout = new QTimer(this);
     readout->setInterval(100);
@@ -179,6 +189,17 @@ QWidget* DemoWindow::dataPanel()
     row->addWidget(signal_, 1);
     row->addWidget(add);
     form->addRow(QStringLiteral("Signal"), row);
+
+    cloud_ = new QComboBox;
+    for (const char* name : kClouds) {
+        cloud_->addItem(QString::fromUtf8(name));
+    }
+    auto* scatter = new QPushButton(QStringLiteral("Add"));
+    connect(scatter, &QPushButton::clicked, this, [this] { addPoints(cloud_->currentIndex()); });
+    auto* points = new QHBoxLayout;
+    points->addWidget(cloud_, 1);
+    points->addWidget(scatter);
+    form->addRow(QStringLiteral("Points"), points);
 
     stream_ = new QPushButton(QStringLiteral("Stream five million samples"));
     connect(stream_, &QPushButton::clicked, this, &DemoWindow::startStream);
@@ -221,7 +242,9 @@ QWidget* DemoWindow::dataPanel()
         "<b>Drag</b> pans, past the data but not off it.<br>"
         "<b>Right-drag</b> zooms to a band. <b>Double-click</b> puts the view back.<br>"
         "<b>Alt-drag</b> or <b>middle-drag</b> moves a line; <b>Alt+Control+wheel</b> "
-        "scales it; <b>Control-click</b> puts it back."));
+        "scales it; <b>Control-click</b> puts it back.<br>"
+        "<b>Click</b> selects a point; <b>Shift-click</b> adds or removes one; "
+        "<b>Shift+right-drag</b> selects what the band holds (<b>Control</b> as well adds)."));
     help->setWordWrap(true);
     form->addRow(help);
     return panel;
@@ -434,6 +457,77 @@ QWidget* DemoWindow::linesPanel()
     return panel;
 }
 
+QWidget* DemoWindow::pointsPanel()
+{
+    auto* panel = new QWidget;
+    auto* form = new QFormLayout(panel);
+    const auto settingsChanged = [this] { applySettings(); };
+
+    pointDrawing_ = new QComboBox;
+    pointDrawing_->addItems(
+        {QStringLiteral("adaptive"), QStringLiteral("markers"), QStringLiteral("image")});
+    pointDrawing_->setToolTip(
+        QStringLiteral("markers: a dot a point drawn, painted here. image: plotcore paints the "
+                       "pane's pixels. adaptive: markers while a scatter is sparse."));
+    connect(pointDrawing_, &QComboBox::currentTextChanged, this, settingsChanged);
+    form->addRow(QStringLiteral("Drawn as"), pointDrawing_);
+
+    colourMap_ = new QComboBox;
+    for (const std::string& name : plotcore::rampNames()) {
+        colourMap_->addItem(QString::fromStdString(name));
+    }
+    colourMap_->setCurrentText(QStringLiteral("viridis"));
+    connect(colourMap_, &QComboBox::currentTextChanged, this, settingsChanged);
+    colourReversed_ = new QCheckBox(QStringLiteral("reversed"));
+    colourLog_ = new QCheckBox(QStringLiteral("logarithmic"));
+    colourBar_ = new QCheckBox(QStringLiteral("bar"));
+    colourBar_->setChecked(true);
+    for (QCheckBox* box : {colourReversed_, colourLog_, colourBar_}) {
+        connect(box, &QCheckBox::toggled, this, settingsChanged);
+    }
+    auto* map = new QHBoxLayout;
+    map->addWidget(colourMap_, 1);
+    map->addWidget(colourReversed_);
+    map->addWidget(colourLog_);
+    map->addWidget(colourBar_);
+    form->addRow(QStringLiteral("Colour axis"), map);
+    colourLabel_ = new QLineEdit;
+    connect(colourLabel_, &QLineEdit::editingFinished, this, settingsChanged);
+    form->addRow(QStringLiteral("Its name"), colourLabel_);
+
+    pointGestures_ = new QCheckBox(QStringLiteral("A click and a Shift-band select"));
+    pointGestures_->setChecked(true);
+    connect(pointGestures_, &QCheckBox::toggled, this, settingsChanged);
+    form->addRow(QStringLiteral("Select"), pointGestures_);
+    selected_ = new QLabel(QStringLiteral("nothing selected"));
+    selected_->setWordWrap(true);
+    auto* clear = new QPushButton(QStringLiteral("Clear the selection"));
+    connect(clear, &QPushButton::clicked, this, [this] {
+        plot_->figure().clearSelection();
+        refreshSelection();
+        plot_->update();
+    });
+    form->addRow(QString(), selected_);
+    form->addRow(QString(), clear);
+    return panel;
+}
+
+void DemoWindow::refreshSelection()
+{
+    const plotcore::Figure& figure = plot_->figure();
+    QStringList said;
+    for (int i = 0; i < figure.plot().lineCount(); ++i) {
+        const long long count = figure.selectionCount(i);
+        if (count > 0) {
+            said << QStringLiteral("%1: %2 selected")
+                        .arg(QString::fromStdString(figure.plot().name(i)))
+                        .arg(count);
+        }
+    }
+    selected_->setText(said.isEmpty() ? QStringLiteral("nothing selected")
+                                      : said.join(QStringLiteral("; ")));
+}
+
 QWidget* DemoWindow::viewPanel()
 {
     auto* panel = new QWidget;
@@ -520,6 +614,36 @@ void DemoWindow::addSignal(int which)
         break;
     }
     addLine(signal.name, signal.values);
+}
+
+void DemoWindow::addPoints(int which)
+{
+    Cloud cloud;
+    switch (which) {
+    case 0:
+        cloud = gaussianCloud(1'000'000, 3);
+        break;
+    case 1:
+        cloud = gaussianCloud(10'000'000, 5);
+        break;
+    case 2:
+        cloud = clusters(3'000'000, 7);
+        break;
+    default:
+        cloud = spiral(200'000);
+        break;
+    }
+    plotcore::Plot& plot = plot_->figure().plot();
+    const auto count = static_cast<long long>(cloud.x.size());
+    const int line = plot.addPoints(cloud.x.data(), cloud.y.data(), count, cloud.name);
+    if (!cloud.values.empty()) {
+        plot.setPointValues(line, cloud.values.data(), count);
+    }
+    if (!cloud.rgba.empty()) {
+        plot.setPointColours(line, cloud.rgba.data(), count);
+    }
+    refreshLines();
+    plot_->update();
 }
 
 void DemoWindow::addEverySignal()
@@ -657,6 +781,13 @@ plotcore::FigureSettings DemoWindow::settings() const
     out.stacked = stacked_->isChecked();
     out.dark = dark_->isChecked();
     out.paper = paper_->isChecked();
+    (void)plotcore::pointDrawingOf(pointDrawing_->currentText().toStdString(), out.pointDrawing);
+    out.colourMap = colourMap_->currentText().toStdString();
+    out.colourReversed = colourReversed_->isChecked();
+    out.colourLog = colourLog_->isChecked();
+    out.colourBar = colourBar_->isChecked();
+    out.colourLabel = colourLabel_->text().toStdString();
+    out.pointGestures = pointGestures_->isChecked();
     return out;
 }
 
@@ -765,6 +896,10 @@ void DemoWindow::refreshLines()
         });
         lines_->setCellWidget(i, Colour, colour);
 
+        if (plot.kind(i) == plotcore::LineKind::Points) {
+            // A scatter's x is its own, and it takes no time base.
+            lines_->setCellWidget(i, OwnTime, new QLabel(QStringLiteral("its own x")));
+        }
         auto* time = new QComboBox;
         time->addItems({QStringLiteral("shared"), QStringLiteral("own, steady"),
                         QStringLiteral("own, wandering")});
@@ -782,7 +917,12 @@ void DemoWindow::refreshLines()
             plot_->figure().resetView();
             plot_->update();
         });
-        lines_->setCellWidget(i, OwnTime, time);
+        if (plot.kind(i) == plotcore::LineKind::Line) {
+            lines_->setCellWidget(i, OwnTime, time);
+        }
+        else {
+            delete time;
+        }
 
         auto* back = new QPushButton(QStringLiteral("put back"));
         connect(back, &QPushButton::clicked, this, [this, i] {
@@ -854,6 +994,13 @@ void DemoWindow::refreshStatus()
                     .arg(QString::fromStdString(plot_->figure().plot().name(scene.reading.line)),
                          QString::fromStdString(scene.reading.xText),
                          QString::fromStdString(scene.reading.yText));
+        if (scene.reading.element >= 0) {
+            text += QStringLiteral(" (#%1)").arg(scene.reading.element);
+        }
+        if (!scene.reading.valueText.empty()) {
+            text +=
+                QStringLiteral(", value %1").arg(QString::fromStdString(scene.reading.valueText));
+        }
     }
     if (!streamTimer_.isActive()) {
         status_->setText(text);
@@ -862,7 +1009,9 @@ void DemoWindow::refreshStatus()
     const double mb = 8.0 / (1024.0 * 1024.0);
     QString bases;
     for (int i = 0; i < plot.lineCount(); ++i) {
-        bases += (i == 0 ? QString() : QStringLiteral(" ")) + QString::number(plot.baseBucket(i));
+        bases += (i == 0 ? QString() : QStringLiteral(" ")) +
+                 (plot.kind(i) == plotcore::LineKind::Points ? QStringLiteral("points")
+                                                             : QString::number(plot.baseBucket(i)));
     }
     held_->setText(QStringLiteral("held %1 of %2 MB   base buckets %3")
                        .arg(static_cast<double>(plot.heldDoubles()) * mb, 0, 'f', 1)
@@ -943,6 +1092,13 @@ void DemoWindow::loadView()
     stacked_->setChecked(s.stacked);
     dark_->setChecked(s.dark);
     paper_->setChecked(s.paper);
+    pointDrawing_->setCurrentText(QString::fromLatin1(plotcore::pointDrawingName(s.pointDrawing)));
+    colourMap_->setCurrentText(QString::fromStdString(s.colourMap));
+    colourReversed_->setChecked(s.colourReversed);
+    colourLog_->setChecked(s.colourLog);
+    colourBar_->setChecked(s.colourBar);
+    colourLabel_->setText(QString::fromStdString(s.colourLabel));
+    pointGestures_->setChecked(s.pointGestures);
     refreshing_ = false;
     refreshLines();
     highlighted_->setCurrentIndex(s.highlighted + 1);
@@ -1199,6 +1355,60 @@ int DemoWindow::selfTest(const QString& picture)
         streamStep();
     }
     check(frame().lines.size() == 9, "a line streamed in pieces is drawn once it is whole");
+
+    // Scatters: a million points drawn as an image of the pane; a spiral of
+    // colours of its own as markers; a click that selects; a band that
+    // selects; and the colour axis drawn as a bar.
+    plot_->figure().clear();
+    refreshLines();
+    addPoints(0);
+    addPoints(3);
+    pointDrawing_->setCurrentText(QStringLiteral("adaptive"));
+    colourLabel_->setText(QStringLiteral("radius"));
+    applySettings();
+    const plotcore::Scene points = frame();
+    check(points.lines.size() == 2 && points.lines[0].kind == plotcore::LineKind::Points,
+          "a scatter of a million points is drawn");
+    check(points.lines[0].image.has_value(), "...as an image of the pane");
+    check(points.colourAxis.has_value() && points.colourAxis->label == "radius",
+          "...coloured through the colour axis, whose bar is named");
+    check(inkOf(plot_->render(QSize(800, 500), 2.0)) > 10000, "...painted, at twice the pixels");
+    pointDrawing_->setCurrentText(QStringLiteral("markers"));
+    plot_->figure().setViewRange(-0.2, 0.2, -0.2, 0.2);
+    const plotcore::Scene dotted = frame();
+    const plotcore::DrawnLine& spiralDots = dotted.lines[1];
+    check(!spiralDots.markers.empty() &&
+              spiralDots.markerColours.size() == spiralDots.markers.size(),
+          "a spiral of colours of its own, as markers");
+    const plotcore::Point dot = spiralDots.markers[spiralDots.markers.size() / 2];
+    mouse(QEvent::MouseButtonPress, QPointF(dot.x(), dot.y()), Qt::LeftButton, Qt::NoModifier);
+    mouse(QEvent::MouseButtonRelease, QPointF(dot.x(), dot.y()), Qt::LeftButton, Qt::NoModifier);
+    check(plot_->figure().selectionCount(0) + plot_->figure().selectionCount(1) == 1,
+          "a click selects the point under it");
+    check(selected_->text().contains(QStringLiteral("1 selected")), "...and the panel says so");
+    plot_->figure().resetView();
+    const plotcore::Scene whole = frame();
+    const QPointF from(whole.area.x + whole.area.width * 0.4,
+                       whole.area.y + whole.area.height * 0.4);
+    const QPointF to(whole.area.x + whole.area.width * 0.6, whole.area.y + whole.area.height * 0.6);
+    mouse(QEvent::MouseButtonPress, from, Qt::RightButton, Qt::ShiftModifier);
+    mouse(QEvent::MouseMove, to, Qt::RightButton, Qt::ShiftModifier);
+    mouse(QEvent::MouseButtonRelease, to, Qt::RightButton, Qt::ShiftModifier);
+    check(plot_->figure().selectionCount(0) > 1000 && !plot_->figure().camera().zoomed(),
+          "Shift and a right drag select what the band holds, and zoom nothing");
+    mouse(QEvent::MouseButtonPress, from, Qt::LeftButton, Qt::NoModifier);
+    mouse(QEvent::MouseButtonRelease, from, Qt::LeftButton, Qt::NoModifier);
+    mouse(QEvent::MouseButtonDblClick, from, Qt::LeftButton, Qt::NoModifier);
+    check(plot_->figure().selectionCount(0) > 1000, "a double click keeps the selection");
+    flipped_->setChecked(true);
+    check(frame().lines.size() == 2, "scatters flipped");
+    flipped_->setChecked(false);
+    stacked_->setChecked(true);
+    check(frame().lines.size() == 2, "scatters stacked");
+    stacked_->setChecked(false);
+    plot_->figure().clearSelection();
+    refreshSelection();
+    pointDrawing_->setCurrentText(QStringLiteral("adaptive"));
 
     // The picture: of the whole of it, in the cycle the plot opens on.
     colourMode_->setCurrentIndex(0);

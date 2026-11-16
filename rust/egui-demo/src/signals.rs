@@ -113,6 +113,98 @@ pub fn ten_million() -> Signal {
     Signal { name: "ten million".into(), values }
 }
 
+/// Points to scatter: an x and a y each, and what each is coloured by -- a
+/// value through the colour axis, or a colour of its own -- when it is.
+pub struct Cloud {
+    pub name: String,
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+    pub values: Option<Vec<f64>>,
+    pub rgba: Option<Vec<[u8; 4]>>,
+}
+
+pub const CLOUDS: [&str; 4] = [
+    "Cloud, a million points",
+    "Cloud, ten million points",
+    "Clusters, three million points",
+    "Spiral, 200 000 points of their own colours",
+];
+
+pub fn make_cloud(which: usize) -> Cloud {
+    match which {
+        0 => gaussian_cloud(1_000_000, 3),
+        1 => gaussian_cloud(10_000_000, 5),
+        2 => clusters(3_000_000, 7),
+        _ => spiral(200_000),
+    }
+}
+
+/// A normal draw, by Box and Muller from two of the walk's.
+fn normal(random: &mut Lcg) -> f64 {
+    let u = random.next().max(1e-12);
+    let v = random.next();
+    (-2.0 * u.ln()).sqrt() * (TAU * v).cos()
+}
+
+/// Two correlated bells, coloured by how far each point is from the middle.
+pub fn gaussian_cloud(count: usize, seed: u32) -> Cloud {
+    let mut random = Lcg(seed);
+    let (mut x, mut y, mut values) =
+        (Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count));
+    for _ in 0..count {
+        let a = normal(&mut random);
+        let b = normal(&mut random);
+        x.push(a);
+        y.push(0.6 * a + 0.8 * b);
+        values.push(a.hypot(b));
+    }
+    Cloud { name: format!("cloud of {count}"), x, y, values: Some(values), rgba: None }
+}
+
+/// A few dozen clusters of every size, with points that stand at one place
+/// thousands of times over: what a tree must not walk point by point.
+pub fn clusters(count: usize, seed: u32) -> Cloud {
+    let mut random = Lcg(seed);
+    let centres: Vec<[f64; 3]> = (0..40)
+        .map(|_| {
+            let (cx, cy) = (20.0 * random.next(), 10.0 * random.next());
+            [cx, cy, 0.02 + 0.5 * random.next() * random.next()]
+        })
+        .collect();
+    let (mut x, mut y, mut values) =
+        (Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count));
+    for i in 0..count {
+        let k = (random.next() * 39.0) as usize;
+        let [cx, cy, spread] = centres[k];
+        // Every hundredth point of a cluster on its very centre: the duplicates.
+        let centre = i % 100 == 0;
+        x.push(cx + if centre { 0.0 } else { spread * normal(&mut random) });
+        y.push(cy + if centre { 0.0 } else { spread * normal(&mut random) });
+        values.push(k as f64);
+    }
+    Cloud { name: "clusters".into(), x, y, values: Some(values), rgba: None }
+}
+
+/// A spiral whose points each carry a colour of their own, round the hues.
+pub fn spiral(count: usize) -> Cloud {
+    let mut random = Lcg(99);
+    let (mut x, mut y, mut rgba) =
+        (Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count));
+    for i in 0..count {
+        let t = i as f64 / count as f64;
+        let angle = 6.0 * TAU * t;
+        let radius = t * (1.0 + 0.06 * normal(&mut random));
+        x.push(radius * angle.cos());
+        y.push(radius * angle.sin());
+        let channel = |offset: f64| {
+            let h = (6.0 * t + offset) % 6.0;
+            (255.0 * h.min(4.0 - h).clamp(0.0, 1.0)).round() as u8
+        };
+        rgba.push([channel(2.0), channel(0.0), channel(4.0), 255]);
+    }
+    Cloud { name: "spiral".into(), x, y, values: None, rgba: Some(rgba) }
+}
+
 pub fn regular_time(count: usize, step: f64) -> Vec<f64> {
     (0..count).map(|i| i as f64 * step).collect()
 }

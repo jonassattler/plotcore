@@ -52,7 +52,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import plotcore  # noqa: E402
 from plotcore.qt import PlotWidget  # noqa: E402
-from signals import SIGNALS, irregular_time, load, random_walk, regular_time  # noqa: E402
+from signals import (  # noqa: E402
+    CLOUDS,
+    SIGNALS,
+    irregular_time,
+    load,
+    random_walk,
+    regular_time,
+)
 
 GRIDS = ["none", "loose", "dense", "custom"]
 CORNERS = ["top-left", "top-right", "bottom-left", "bottom-right"]
@@ -93,6 +100,7 @@ class DemoWindow(QMainWindow):
         tabs.addTab(self._data_panel(), "Data")
         tabs.addTab(self._axes_panel(), "Axes")
         tabs.addTab(self._lines_panel(), "Lines")
+        tabs.addTab(self._points_panel(), "Points")
         tabs.addTab(self._view_panel(), "View")
         scroll = QScrollArea()
         scroll.setWidget(tabs)
@@ -107,6 +115,7 @@ class DemoWindow(QMainWindow):
         self.statusBar().addWidget(self.status, 1)
         self.statusBar().addPermanentWidget(self.held)
         self.plot.changed.connect(self._after_gesture)
+        self.plot.selection_changed.connect(self._refresh_selection)
         self.readout = QTimer(self, interval=100, timeout=self._refresh_status)
         self.readout.start()
         self.stream_timer = QTimer(self, interval=15, timeout=self._stream_step)
@@ -133,6 +142,14 @@ class DemoWindow(QMainWindow):
         row.addWidget(self.signal, 1)
         row.addWidget(add)
         form.addRow("Signal", row)
+        self.cloud = QComboBox()
+        self.cloud.addItems([name for name, _ in CLOUDS])
+        scatter = QPushButton("Add")
+        scatter.clicked.connect(lambda: self.add_points(self.cloud.currentIndex()))
+        points = QHBoxLayout()
+        points.addWidget(self.cloud, 1)
+        points.addWidget(scatter)
+        form.addRow("Points", points)
         self.stream = QPushButton("Stream five million samples")
         self.stream.clicked.connect(self.start_stream)
         form.addRow("", self.stream)
@@ -157,7 +174,9 @@ class DemoWindow(QMainWindow):
             "<b>Drag</b> pans, past the data but not off it.<br>"
             "<b>Right-drag</b> zooms to a band. <b>Double-click</b> puts the view back.<br>"
             "<b>Alt-drag</b> or <b>middle-drag</b> moves a line; <b>Alt+Control+wheel</b> "
-            "scales it; <b>Control-click</b> puts it back.")
+            "scales it; <b>Control-click</b> puts it back.<br>"
+            "<b>Click</b> selects a point; <b>Shift-click</b> adds or removes one; "
+            "<b>Shift+right-drag</b> selects what the band holds (<b>Control</b> as well adds).")
         help_text.setWordWrap(True)
         form.addRow(help_text)
         return panel
@@ -319,6 +338,52 @@ class DemoWindow(QMainWindow):
         layout.addWidget(self.lines, 1)
         return panel
 
+    def _points_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        changed = self._apply_settings
+        self.point_drawing = QComboBox()
+        self.point_drawing.addItems(["adaptive", "markers", "image"])
+        self.point_drawing.setToolTip("markers: a dot a point drawn, painted here. image: "
+                                      "plotcore paints the pane's pixels. adaptive: markers "
+                                      "while a scatter is sparse.")
+        self.point_drawing.currentTextChanged.connect(changed)
+        form.addRow("Drawn as", self.point_drawing)
+        self.colour_map = QComboBox()
+        self.colour_map.addItems(plotcore.ramp_names())
+        self.colour_map.setCurrentText("viridis")
+        self.colour_map.currentTextChanged.connect(changed)
+        self.colour_reversed = QCheckBox("reversed")
+        self.colour_log = QCheckBox("logarithmic")
+        self.colour_bar = QCheckBox("bar")
+        self.colour_bar.setChecked(True)
+        row = QHBoxLayout()
+        row.addWidget(self.colour_map, 1)
+        for box in (self.colour_reversed, self.colour_log, self.colour_bar):
+            box.toggled.connect(changed)
+            row.addWidget(box)
+        form.addRow("Colour axis", row)
+        self.colour_label = QLineEdit()
+        self.colour_label.editingFinished.connect(changed)
+        form.addRow("Its name", self.colour_label)
+        self.point_gestures = QCheckBox("A click and a Shift-band select")
+        self.point_gestures.setChecked(True)
+        self.point_gestures.toggled.connect(changed)
+        form.addRow("Select", self.point_gestures)
+        self.selected = QLabel("nothing selected")
+        self.selected.setWordWrap(True)
+        clear = QPushButton("Clear the selection")
+        clear.clicked.connect(lambda: (self.figure.clear_selection(), self._refresh_selection(),
+                                       self.plot.update()))
+        form.addRow("", self.selected)
+        form.addRow("", clear)
+        return panel
+
+    def _refresh_selection(self) -> None:
+        said = [f"{line.name}: {len(line.selection)} selected" for line in self.figure.lines()
+                if line.kind == plotcore.LineKind.POINTS and len(line.selection)]
+        self.selected.setText("; ".join(said) if said else "nothing selected")
+
     def _view_panel(self) -> QWidget:
         panel = QWidget()
         form = QFormLayout(panel)
@@ -375,6 +440,16 @@ class DemoWindow(QMainWindow):
         else:
             label, values = make()
         self.add_line(label, values)
+
+    def add_points(self, which: int) -> None:
+        cloud = CLOUDS[which][1]()
+        line = self.figure.add_points(cloud.x, cloud.y, cloud.name)
+        if cloud.values is not None:
+            self.figure.set_point_values(line, cloud.values)
+        if cloud.rgba is not None:
+            self.figure.set_point_colours(line, cloud.rgba)
+        self.refresh_lines()
+        self.plot.update()
 
     def add_every_signal(self) -> None:
         for which in range(len(SIGNALS)):
@@ -482,6 +557,13 @@ class DemoWindow(QMainWindow):
         s["stacked"] = self.stacked.isChecked()
         s["dark"] = self.dark.isChecked()
         s["paper"] = self.paper.isChecked()
+        s["pointDrawing"] = self.point_drawing.currentText()
+        s["colourMap"] = self.colour_map.currentText()
+        s["colourReversed"] = self.colour_reversed.isChecked()
+        s["colourLog"] = self.colour_log.isChecked()
+        s["colourBar"] = self.colour_bar.isChecked()
+        s["colourLabel"] = self.colour_label.text()
+        s["pointGestures"] = self.point_gestures.isChecked()
         self.plot.update()
         self._refresh_view_boxes()
 
@@ -553,10 +635,15 @@ class DemoWindow(QMainWindow):
                     paint_swatch(colour, line.colour)
                 colour.clicked.connect(lambda _=False, index=i: self._pick_line_colour(index))
                 self.lines.setCellWidget(i, COLOUR, colour)
-                time = QComboBox()
-                time.addItems(["shared", "own, steady", "own, wandering"])
-                time.currentIndexChanged.connect(lambda mode, index=i: self._line_time(index, mode))
-                self.lines.setCellWidget(i, TIME, time)
+                if line.kind == plotcore.LineKind.POINTS:
+                    # A scatter's x is its own, and it takes no time base.
+                    self.lines.setCellWidget(i, TIME, QLabel("its own x"))
+                else:
+                    time = QComboBox()
+                    time.addItems(["shared", "own, steady", "own, wandering"])
+                    time.currentIndexChanged.connect(
+                        lambda mode, index=i: self._line_time(index, mode))
+                    self.lines.setCellWidget(i, TIME, time)
                 back = QPushButton("put back")
                 back.clicked.connect(lambda _=False, index=i: self._put_back(index))
                 self.lines.setCellWidget(i, BACK, back)
@@ -631,9 +718,14 @@ class DemoWindow(QMainWindow):
         if scene.reading.valid:
             name = self.figure.line(scene.reading.line).name
             text += f"   —   {name}: x {scene.reading.x_text}, y {scene.reading.y_text}"
+            if scene.reading.element >= 0:
+                text += f" (#{scene.reading.element})"
+            if scene.reading.value_text:
+                text += f", value {scene.reading.value_text}"
         if not self.stream_timer.isActive():
             self.status.setText(text)
-        bases = " ".join(str(line.base_bucket) for line in self.figure.lines())
+        bases = " ".join("points" if line.kind == plotcore.LineKind.POINTS
+                         else str(line.base_bucket) for line in self.figure.lines())
         self.held.setText(f"held {self.figure.held_bytes / 2**20:.1f} of "
                           f"{self.figure.budget_bytes / 2**20:.0f} MB   base buckets {bases}")
 
@@ -689,6 +781,13 @@ class DemoWindow(QMainWindow):
             self.stacked.setChecked(s["stacked"])
             self.dark.setChecked(s["dark"])
             self.paper.setChecked(s["paper"])
+            self.point_drawing.setCurrentText(s["pointDrawing"])
+            self.colour_map.setCurrentText(s["colourMap"])
+            self.colour_reversed.setChecked(s["colourReversed"])
+            self.colour_log.setChecked(s["colourLog"])
+            self.colour_bar.setChecked(s["colourBar"])
+            self.colour_label.setText(s["colourLabel"])
+            self.point_gestures.setChecked(s["pointGestures"])
             self._repaint_swatches()
         finally:
             self.refreshing = False
@@ -909,11 +1008,59 @@ class DemoWindow(QMainWindow):
             self._stream_step()
         check(len(frame().lines) == 9, "a line streamed in pieces is drawn once it is whole")
 
+        # Scatters: a million points drawn as an image of the pane; a spiral of
+        # colours of its own as markers; a click that selects; a band that
+        # selects; and the colour axis drawn as a bar.
+        self.clear_lines()
+        self.add_points(0)
+        self.add_points(3)
+        self.point_drawing.setCurrentText("adaptive")
+        self.colour_label.setText("radius")
+        self._apply_settings()
+        points = frame()
+        check(len(points.lines) == 2 and points.lines[0].kind == plotcore.LineKind.POINTS,
+              "a scatter of a million points is drawn")
+        check(points.lines[0].image is not None, "...as an image of the pane")
+        check(points.colour_axis is not None, "...coloured through the colour axis, as a bar")
+        self.point_drawing.setCurrentText("markers")
+        self.figure.set_view(-0.2, 0.2, -0.2, 0.2)
+        dotted = frame()
+        spiral_dots = dotted.lines[1]
+        check(len(spiral_dots.markers) > 0
+              and len(spiral_dots.marker_colours) == len(spiral_dots.markers),
+              "a spiral of colours of its own, as markers")
+        dot = QPointF(*spiral_dots.markers[len(spiral_dots.markers) // 2])
+        mouse(QMouseEvent.Type.MouseButtonPress, dot, Qt.MouseButton.LeftButton)
+        mouse(QMouseEvent.Type.MouseButtonRelease, dot, Qt.MouseButton.LeftButton)
+        chosen = len(self.figure.selection(0)) + len(self.figure.selection(1))
+        check(chosen == 1, "a click selects the point under it")
+        check("1 selected" in self.selected.text(), "...and the panel says so")
+        self.figure.reset_view()
+        area = frame().area
+        start = QPointF(area.x + area.width * 0.4, area.y + area.height * 0.4)
+        end = QPointF(area.x + area.width * 0.6, area.y + area.height * 0.6)
+        shift = Qt.KeyboardModifier.ShiftModifier
+        mouse(QMouseEvent.Type.MouseButtonPress, start, Qt.MouseButton.RightButton, shift)
+        mouse(QMouseEvent.Type.MouseMove, end, Qt.MouseButton.RightButton, shift)
+        mouse(QMouseEvent.Type.MouseButtonRelease, end, Qt.MouseButton.RightButton, shift)
+        check(len(self.figure.selection(0)) > 1000 and frame().view == points.view,
+              "Shift and a right drag select what the band holds, and zoom nothing")
+        self.flipped.setChecked(True)
+        check(len(frame().lines) == 2, "scatters flipped")
+        self.flipped.setChecked(False)
+        self.figure.clear_selection()
+        self._refresh_selection()
+        self.point_drawing.setCurrentText("adaptive")
+        self.add_every_signal()
+        check(len(frame().lines) == 8, "scatters and lines on one pane")
+
         self.open_in_matplotlib()
         QApplication.processEvents()
         view = self.mpl_dialog.view
-        check(len(view.ax.get_lines()) + sum(len(t.get_lines()) for t in view._extra) >= 9,
+        check(len(view.ax.get_lines()) + sum(len(t.get_lines()) for t in view._extra) >= 6,
               "the same figure in matplotlib")
+        check(len(view.ax.images) + len(view.ax.collections) >= 2,
+              "...its scatters too, as an image and as dots")
         self.mpl_dialog.close()
 
         self.colour_mode.setCurrentIndex(0)
