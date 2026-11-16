@@ -13,6 +13,10 @@ Rust library.
   is already held instead of reading again.
 - **The same axes, gestures and colours.** They are the viewer's own, and its
   parity tests hold the two to each other.
+- **Scatters of millions, beside the lines.** Points given by an x and a y each
+  share the pane and every setting a line has, are coloured by a value through
+  a colour bar or by a colour of their own, are selected by a click or a band,
+  and reach the host as one image of the pane when they are dense.
 - **The same plot from Rust, C++ and Python.** All three libraries are one
   plot, and a golden script of settings and gestures is what they all have to
   draw identically.

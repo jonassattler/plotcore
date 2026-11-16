@@ -14,6 +14,12 @@ for C++, C, Python and Rust.
 - **A zoom reads nothing.** Every picture is a fold of what is already held:
   the cost of a frame follows the width of the pane, not the length of the
   line.
+- **Scatters of millions, beside the lines.** Points given by an x and a y each
+  share the pane, the axes and every setting a line has. They are held in a tree
+  that keeps each region's topmost point, so a frame visits about as many nodes
+  as the pane has pixels and no outlier is lost. Each point may be coloured by
+  a value through a colour bar or by a colour of its own, and selected by a
+  click or a band. A dense scatter reaches the host as one image of the pane.
 - **The axes, gestures and colours are H5Scope's own,** ported function for
   function, and H5Scope's parity tests hold the two to each other. That
   includes logarithmic axes in any base, separate and stacked y axes, a flipped
@@ -29,7 +35,7 @@ that walks every feature on one window.
 
 | Path | What it is |
 |---|---|
-| `cpp` | The C++ library, `plotcore::core`: the arithmetic (`Projection`, `Levels`, `Pyramid`, `Budget`), the frame and gestures (`Format`, `Ticks`, `Camera`, `Palettes`), the store (`Plot`), and `Figure`, the whole plot a host drives. Beside it `qt`, a `QWidget` over a `Figure` (`plotcore::qt`), and `qt-demo` |
+| `cpp` | The C++ library, `plotcore::core`: the arithmetic (`Projection`, `Levels`, `Pyramid`, `Scatter`, `Budget`), the frame and gestures (`Format`, `Ticks`, `Camera`, `Palettes`), the store (`Plot`), and `Figure`, the whole plot a host drives. Beside it `qt`, a `QWidget` over a `Figure` (`plotcore::qt`), and `qt-demo` |
 | `c` | `Figure` as C, built as one shared library, `plotcore::c`, which the Python and Rust libraries are built on |
 | `python` | The Python package: ctypes over the C interface, with a PyQt6 widget and a matplotlib host. Beside it `pyqt6-demo` |
 | `rust` | The Rust workspace: `plotcore-sys`, the safe `plotcore` crate, `plotcore-egui`, and `egui-demo` |

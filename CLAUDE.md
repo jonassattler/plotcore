@@ -96,9 +96,9 @@ each define their own targets.
 
 | Path | What it is |
 |---|---|
-| `cpp/include/plotcore/`, `cpp/src/` | `plotcore::core`. The arithmetic: `Projection` (where a sample lands, gaps, the thinning, strokes as triangles), `Levels` (the fold and its seams, and the policy over held runs), `RunLadder` (the runs a host that reads on a thread holds under that policy, and the read it is to make next), `Pyramid` (what every run is folded out of), `Budget` (what may be held), `Parallel` (the pool a large fold is spread over). The frame: `Format`, `Ticks`, `Camera`, `Palettes`. Then `LineSource` (what a figure asks of its lines), `Plot` (lines held, and one such source) and `Figure` (the whole plot a host drives). `cpp/src/Json.*` is private. |
-| `cpp/bench/` | `plotcore-bench`, what each way of drawing a line costs and how still it holds, over the demos' signals; `plotcore-bench-qt` is the same through the widget, where painting is most of a frame. Its `--smoke` is a ctest test, and asserts counts. |
-| `cpp/tests/` | The Catch2 suites: `test_plotprojection`, `test_plotlevels`, `test_plotruns`, `test_plotfigure`, `test_plotaxes` (the rules the viewer's suite held its QML axes to), and `test_plotviewer`, which asks again every question H5Scope's parity suite asked and holds the answers to the ones recorded in `viewer/answers.jsonl`. |
+| `cpp/include/plotcore/`, `cpp/src/` | `plotcore::core`. The arithmetic: `Projection` (where a sample lands, gaps, the thinning, strokes as triangles), `Levels` (the fold and its seams, and the policy over held runs), `RunLadder` (the runs a host that reads on a thread holds under that policy, and the read it is to make next), `Pyramid` (what every run is folded out of), `Scatter` (a scatter's point tree, the points a frame draws, picking, and the image of dense ones), `Budget` (what may be held), `Parallel` (the pool a large fold is spread over). The frame: `Format`, `Ticks`, `Camera`, `Palettes`. Then `LineSource` (what a figure asks of its lines), `Plot` (lines held, and one such source) and `Figure` (the whole plot a host drives). `cpp/src/Json.*` is private. |
+| `cpp/bench/` | `plotcore-bench`, what each way of drawing a line costs and how still it holds, over the demos' signals; `plotcore-bench-qt` is the same through the widget, where painting is most of a frame. `plotcore-bench-scatter` (and `-qt`) is the same for scatters, over clouds that tell the walk's cases apart. Each `--smoke` is a ctest test, and asserts counts. |
+| `cpp/tests/` | The Catch2 suites: `test_plotprojection`, `test_plotlevels`, `test_plotruns`, `test_plotscatter` (the point tree, against brute force), `test_plotfigure`, `test_plotaxes` (the rules the viewer's suite held its QML axes to), and `test_plotviewer`, which asks again every question H5Scope's parity suite asked and holds the answers to the ones recorded in `viewer/answers.jsonl`. |
 | `cpp/qt/`, `cpp/qt-demo/` | `plotcore::qt`, a `QWidget` over a `Figure`, and the Qt demo. |
 | `c/` | `plotcore.h`, `Figure` as C, built as `plotcore_c`, and `tests/test_capi.c`. |
 | `python/` | The package (`src/plotcore`: `_native.py`, `figure.py`, `scene.py`, `qt.py`, `mpl.py`), its tests, and `pyqt6-demo/` with the demo's pinned `requirements.txt`. |
@@ -226,6 +226,36 @@ device pixels. A line then has both runs and bars, so a host paints both, bars
 first. The numbers in those comments come from comparing each form against
 every sample stroked; what each costs and how still it holds is `cpp/bench`.
 
+**A scatter is a line of another kind** (`LineKind::Points`): points given by
+an x and a y each, copied in with `Plot::addPoints` (or begun, appended and
+finished as a line is), and numbered with the lines, so a line's settings,
+series colour, legend row, highlight, stack and gestures are a scatter's too
+and the two share the pane and its axes. `LineSource` asks three things more,
+each with an answer that is no scatter: `kind`, `valueExtent` and `drawPoints`,
+the point tree. `Scatter.hpp` argues the tree: a quadtree over the points'
+*axis positions* (built again when either scale changes, never for a base),
+whose slots are the copy and whose every node keeps its **last point** -- the
+one drawn on top, by element, a selected point after every other -- because the
+last of a union is the last of the lasts of its parts. A frame walks it on
+device-pixel cells aligned in the data (two `ColumnGrid`s) and keeps the last
+of what lands in each cell: a pan is rigid, an outlier is never lost, every
+point lies within two cells of a drawn point at least as late, and a frame
+visits about as many nodes as the pane has cells. A pan takes what the last
+frame knew whole (`PointMemory`) and walks only what it uncovers, drawing
+exactly what a whole walk draws. The points reach the host as markers while a
+scatter's share of `kMaxMarkers` holds them (`pointDrawing`), and past that as
+one premultiplied image of the pane plotcore paints (`DrawnLine::image`,
+`FORM_IMAGE`), the same antialiased discs, so every host shows the same pixels.
+A point is coloured by its own RGBA, or by its value through the **colour
+axis** (`colourMap`, `colourLog`, `colourLow`/`colourHigh`, `colourBar`: a
+third axis named as x's and y's are, drawn as a bar right of the pane whose
+ramp is boxes with `fillTo`), or by the scatter's colour. A click selects the
+point under the pointer, Shift and a click add or remove it, Shift and a right
+drag select what the band holds (`pointGestures`); unselected points go back to
+the strength of a line that is not highlighted, and a double click puts back
+what its first click changed. The golden script keeps scatters to linear axes:
+a logarithm an ulp apart on another platform could put a point in another cell.
+
 `golden/` is what holds the three languages to one plot: a script of
 settings and gestures, and the digest of every scene it asks for. `test_capi`
 writes it (`--write`) and checks it; the Python and Rust tests check the same
@@ -256,7 +286,8 @@ every structure's size to what the C compiler that built the library makes of
 it, because working them out by hand got two of them wrong; `plotcore` is the
 safe wrapper, whose readers and text measure are boxed and handed to the C side
 as contexts it gives back; `plotcore-egui` paints a scene as plotcore's
-triangles or as feathered polylines and hands egui's raw input events over as
+triangles or as feathered polylines, a scatter's image from a texture kept from
+frame to frame (`Pictures`), and hands egui's raw input events over as
 gestures; `egui-demo` walks every feature, and its `--self-test` drives egui
 headless, so `cargo test` needs no display. `plotcore-sys` reaches `cpp/src/`
 and `c/` through links beside its manifest, which is how a packaged crate
