@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <numbers>
 #include <set>
 #include <vector>
 
@@ -491,7 +492,8 @@ TEST_CASE("a disc is painted as an antialiased circle covers its pixels", "[scat
     }
     // The area of a disc of radius six, its edge spread over the pixel either
     // side of the circle, to within a percent.
-    CHECK(std::abs(ink - M_PI * 6.0 * 6.0) < 0.01 * M_PI * 6.0 * 6.0);
+    const double area = std::numbers::pi * 6.0 * 6.0;
+    CHECK(std::abs(ink - area) < 0.01 * area);
     const std::size_t middle = 4 * (15 * 40 + 20);
     CHECK(image[middle] == 255);
     CHECK(image[middle + 1] == 128);
