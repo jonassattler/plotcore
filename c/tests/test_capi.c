@@ -351,13 +351,15 @@ static void contract(void)
         ramps += mark.kind == PLOTCORE_MARK_BOX && mark.fill_to.alpha > 0 ? 1 : 0;
     }
     CHECK(ramps > 0);
-    /* The point under a marker, and a click that selects it. */
+    /* The point under a marker, and a click that selects it. What the scene
+     * says is copied out first: its arrays go with it. */
     const double cx = centres[2 * 40];
     const double cy = centres[2 * 40 + 1];
+    const int64_t under = elements[40];
     plotcore_scene_free(scene);
     plotcore_picked picked;
     CHECK(plotcore_point_at(figure, cx, cy, 12.0, 1, &picked) == 1);
-    CHECK(picked.line == 0 && picked.element == elements[40] && picked.x == xs[elements[40]]);
+    CHECK(picked.line == 0 && picked.element == under && picked.x == xs[under]);
     CHECK(plotcore_press(figure, cx, cy, PLOTCORE_BUTTON_LEFT, 0) == PLOTCORE_OK);
     CHECK(plotcore_release(figure, cx, cy, PLOTCORE_BUTTON_LEFT, 0) == PLOTCORE_OK);
     CHECK(plotcore_selection_count(figure, 0) == 1);
