@@ -15,3 +15,14 @@ if(PLOTCORE_WITH_QT)
     target_compile_definitions(plotcore-bench-qt PRIVATE PLOTCORE_BENCH_QT)
     target_link_libraries(plotcore-bench-qt PRIVATE plotcore::core plotcore::qt)
 endif()
+
+# What a scatter costs to build and to draw, over clouds that tell the walk's
+# cases apart; its smoke form asserts what a frame visits and draws.
+add_executable(plotcore-bench-scatter bench_scatter.cpp)
+target_link_libraries(plotcore-bench-scatter PRIVATE plotcore::core)
+add_test(NAME plotcore_bench_scatter_smoke COMMAND plotcore-bench-scatter --smoke)
+if(PLOTCORE_WITH_QT)
+    add_executable(plotcore-bench-scatter-qt bench_scatter.cpp)
+    target_compile_definitions(plotcore-bench-scatter-qt PRIVATE PLOTCORE_BENCH_QT)
+    target_link_libraries(plotcore-bench-scatter-qt PRIVATE plotcore::core plotcore::qt)
+endif()

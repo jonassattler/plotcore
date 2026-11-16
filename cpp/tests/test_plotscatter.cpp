@@ -509,3 +509,50 @@ TEST_CASE("discs are painted over one another in the order given", "[scatter]")
     CHECK(image[middle + 2] == 128); // half of the blue
     CHECK(image[middle + 3] == 255);
 }
+
+TEST_CASE("a pan from what the last frame knew whole draws what a whole walk draws", "[scatter]")
+{
+    const Cloud c = blob(400000, 47);
+    const PointTree tree = treeOf(c);
+    std::vector<std::uint64_t> bits((400000 + 63) / 64, 0);
+    for (std::uint32_t e = 3; e < 400000; e += 1013) {
+        bits[e >> 6] |= std::uint64_t{1} << (e & 63);
+    }
+    const PointSelection selection = selectionOn(tree, bits);
+    const PointFrame start = frameOver(0.25, 0.75, 0.3, 0.7, 500, 400);
+    // Pans of a part of a cell, of a few, across and up at once, of more than
+    // the window, and none.
+    const std::vector<std::pair<double, double>> pans{{0.3, 0.0},   {3.0, 0.0},   {-7.25, 4.5},
+                                                      {0.0, -12.0}, {800.0, 0.0}, {0.0, 0.0}};
+    for (const PointSelection* chosen : {static_cast<const PointSelection*>(nullptr), &selection}) {
+        PointMemory memory;
+        PointScratch scratch;
+        std::vector<std::uint32_t> out;
+        PointWalk walk;
+        drawnPoints(tree, chosen, start, scratch, out, &walk, &memory, chosen != nullptr ? 1 : 0);
+        REQUIRE(memory.valid);
+        const long long wholeVisits = walk.nodes + walk.points;
+        PointFrame at = start;
+        for (const auto& [dx, dy] : pans) {
+            at.xLow += dx * start.cellX;
+            at.xHigh += dx * start.cellX;
+            at.yLow += dy * start.cellY;
+            at.yHigh += dy * start.cellY;
+            drawnPoints(tree, chosen, at, scratch, out, &walk, &memory, chosen != nullptr ? 1 : 0);
+            const long long panVisits = walk.nodes + walk.points;
+            // Fresh, with nothing remembered.
+            PointScratch fresh;
+            std::vector<std::uint32_t> expected;
+            drawnPoints(tree, chosen, at, fresh, expected);
+            CAPTURE(dx, dy, panVisits, wholeVisits);
+            CHECK(out == expected);
+            if (std::abs(dx) < 50 && std::abs(dy) < 50) {
+                CHECK(panVisits * 4 < wholeVisits); // a strip, not the pane
+            }
+        }
+        // Another selection is another picture: nothing is taken.
+        drawnPoints(tree, chosen, start, scratch, out, &walk, &memory, chosen != nullptr ? 1 : 0);
+        drawnPoints(tree, chosen, start, scratch, out, &walk, &memory, 99);
+        CHECK(walk.nodes + walk.points > wholeVisits / 2);
+    }
+}

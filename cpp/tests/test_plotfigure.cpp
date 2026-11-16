@@ -4017,3 +4017,36 @@ TEST_CASE("the colour axis is written in a view and read back, and the selection
     CHECK(other.selectionCount(0) == 0);
     CHECK(state.find("\"selection") == std::string::npos);
 }
+
+TEST_CASE("a pan of a scatter walks only what it uncovers", "[points][figure]")
+{
+    Figure figure = scatterOf(cloud(400000, 107));
+    FigureSettings settings = figure.settings();
+    settings.pointDrawing = PointDrawing::Image;
+    figure.setSettings(settings);
+    (void)figure.scene();
+    // A zoom is a grid of its own, and walked whole...
+    figure.wheel(400, 250, 240, {});
+    const PointWalk start = figure.pointsWalked();
+    const Scene before = figure.scene();
+    const long long whole = figure.pointsWalked().nodes - start.nodes;
+    // ...and the same frame again takes all it knew and walks its edges.
+    const PointWalk again = figure.pointsWalked();
+    figure.press(400, 250, Button::Left, {});
+    figure.move(403, 250, {});
+    figure.release(403, 250, Button::Left, {});
+    const Scene panned = figure.scene();
+    const long long pan = figure.pointsWalked().nodes - again.nodes;
+    CAPTURE(whole, pan);
+    CHECK(pan * 4 < std::max<long long>(whole, 1) + 1);
+    // ...and draws what a frame walked whole draws: the same figure, with
+    // nothing remembered, laid out at the same window.
+    Figure fresh = scatterOf(cloud(400000, 107));
+    fresh.setSettings(figure.settings());
+    fresh.setViewRange(panned.x.low, panned.x.high, panned.y.low, panned.y.high);
+    const Scene expected = fresh.scene();
+    REQUIRE(panned.lines.front().image.has_value());
+    REQUIRE(expected.lines.front().image.has_value());
+    CHECK(panned.lines.front().image->rgba == expected.lines.front().image->rgba);
+    (void)before;
+}

@@ -652,7 +652,8 @@ PointSelection selectionOn(const PointTree& tree, std::span<const std::uint64_t>
 }
 
 void drawnPoints(const PointTree& tree, const PointSelection* selection, const PointFrame& frame,
-                 PointScratch& scratch, std::vector<std::uint32_t>& out, PointWalk* walk)
+                 PointScratch& scratch, std::vector<std::uint32_t>& out, PointWalk* walk,
+                 PointMemory* memory, std::uint64_t chosenKey)
 {
     out.clear();
     if (walk != nullptr) {
@@ -661,6 +662,9 @@ void drawnPoints(const PointTree& tree, const PointSelection* selection, const P
     if (tree.empty() || !(frame.cellX > 0.0) || !(frame.cellY > 0.0) ||
         !std::isfinite(frame.cellX) || !std::isfinite(frame.cellY) ||
         !(frame.xHigh >= frame.xLow) || !(frame.yHigh >= frame.yLow)) {
+        if (memory != nullptr) {
+            memory->valid = false;
+        }
         return;
     }
     const PointSelection* selected =
@@ -679,6 +683,9 @@ void drawnPoints(const PointTree& tree, const PointSelection* selection, const P
     if (!((xCells + 3.0) * (yCells + 3.0) <= 4.0e7) || !std::isfinite(frame.xLow * perX) ||
         !std::isfinite(frame.yLow * perY) || std::abs(frame.xHigh * perX) > 4.0e18 ||
         std::abs(frame.yHigh * perY) > 4.0e18) {
+        if (memory != nullptr) {
+            memory->valid = false;
+        }
         return;
     }
     // The cells the window covers, and one more on every side: a node that
@@ -692,6 +699,7 @@ void drawnPoints(const PointTree& tree, const PointSelection* selection, const P
     if (scratch.cells.size() < cellCount) {
         scratch.cells.assign(cellCount, 0);
     }
+    std::uint64_t* cells = scratch.cells.data();
     // A point as one word, ordered as it is drawn: whether it is selected,
     // then its element; and its slot, plus one so no point is the empty cell.
     const auto wordOf = [&](std::uint32_t slot) {
@@ -699,105 +707,190 @@ void drawnPoints(const PointTree& tree, const PointSelection* selection, const P
         return (chosen << 63) | (std::uint64_t{tree.element[slot]} << 32) | (slot + 1u);
     };
 
-    // In bands of rows of cells, a band to a piece of the pool. A band owns its
-    // cells, so no two pieces ever land in one; each walks the tree as far as
-    // it meets the band, and the top few levels are walked by every band, which
-    // is nothing beside the rest. How many there are is the pane's to say and
-    // not the machine's, so what a frame visits is the same count everywhere.
+    // Runs of cells, counted from position zero: `[x0, x1)` by `[y0, y1)`.
+    struct Cells
+    {
+        long long x0 = 0;
+        long long x1 = 0;
+        long long y0 = 0;
+        long long y1 = 0;
+        [[nodiscard]] bool empty() const { return x1 <= x0 || y1 <= y0; }
+    };
+    const Cells buffer{x0, x0 + nx, y0, y0 + ny};
+    // Wholly inside the window: the buffer less its ring, and less the
+    // window's first and last cells, which it may only cross.
+    const Cells whole{x0 + 2, x0 + nx - 2, y0 + 2, y0 + ny - 2};
+
+    // What the last frame knew whole of the cells this one knows whole, taken
+    // as it is.
+    Cells kept;
+    if (memory != nullptr && memory->valid && memory->cellX == frame.cellX &&
+        memory->cellY == frame.cellY && memory->generation == tree.generation &&
+        memory->chosen == chosenKey) {
+        kept = Cells{std::max(whole.x0, memory->x0), std::min(whole.x1, memory->x1),
+                     std::max(whole.y0, memory->y0), std::min(whole.y1, memory->y1)};
+        if (!kept.empty()) {
+            const long long width = memory->x1 - memory->x0;
+            for (long long y = kept.y0; y < kept.y1; ++y) {
+                const std::uint64_t* from =
+                    memory->words.data() + (y - memory->y0) * width + (kept.x0 - memory->x0);
+                std::copy(from, from + (kept.x1 - kept.x0), cells + (y - y0) * nx + (kept.x0 - x0));
+            }
+        }
+    }
+
+    // The rest of the buffer, walked: whole when nothing was kept, or the
+    // strips around what was -- above it, below it, and either side of it.
+    std::vector<Cells> regions;
+    if (kept.empty()) {
+        regions.push_back(buffer);
+    }
+    else {
+        regions.push_back(Cells{buffer.x0, buffer.x1, buffer.y0, kept.y0});
+        regions.push_back(Cells{buffer.x0, buffer.x1, kept.y1, buffer.y1});
+        regions.push_back(Cells{buffer.x0, kept.x0, kept.y0, kept.y1});
+        regions.push_back(Cells{kept.x1, buffer.x1, kept.y0, kept.y1});
+    }
+
+    PointWalk counted;
+    for (const Cells& region : regions) {
+        if (region.empty()) {
+            continue;
+        }
+        // What can land in the region meets the window within a cell of it:
+        // a node that stops fits a cell, and holds its last point.
+        const double xLow = std::max(frame.xLow, static_cast<double>(region.x0 - 1) * frame.cellX);
+        const double xHigh =
+            std::min(frame.xHigh, static_cast<double>(region.x1 + 1) * frame.cellX);
+        const long long rows = region.y1 - region.y0;
+        // In bands of rows of cells, a band to a piece of the pool. A band owns
+        // its cells, so no two pieces ever land in one; each walks the tree as
+        // far as it meets the band, and the top few levels are walked by every
+        // band, which is nothing beside the rest. How many there are is the
+        // pane's to say and not the machine's, so what a frame visits is the
+        // same count everywhere.
+        const long long bands = std::clamp<long long>(rows / 32, 1, 64);
+        std::vector<PointWalk> walks(static_cast<std::size_t>(bands));
+        parallelFor(bands, [&](long long b) {
+            PointWalk& part = walks[static_cast<std::size_t>(b)];
+            const long long r0 = region.y0 + rows * b / bands;
+            const long long r1 = region.y0 + rows * (b + 1) / bands;
+            const double yLow = std::max(frame.yLow, static_cast<double>(r0 - 1) * frame.cellY);
+            const double yHigh = std::min(frame.yHigh, static_cast<double>(r1 + 1) * frame.cellY);
+            const auto land = [&](std::uint32_t slot, double x, double y) {
+                ++part.candidates;
+                const long long row = floorOf(y * perY);
+                const long long column = floorOf(x * perX);
+                if (row < r0 || row >= r1 || column < region.x0 || column >= region.x1) {
+                    return;
+                }
+                std::uint64_t& held = cells[(row - y0) * nx + (column - x0)];
+                held = std::max(held, wordOf(slot));
+            };
+            const auto landSlot = [&](std::uint32_t slot) {
+                land(slot, pointPosition(tree.x[slot], tree.xLog),
+                     pointPosition(tree.y[slot], tree.yLog));
+            };
+            std::vector<std::uint32_t> stack{0};
+            while (!stack.empty()) {
+                const std::uint32_t index = stack.back();
+                stack.pop_back();
+                const PointNode& node = tree.nodes[index];
+                ++part.nodes;
+                if (node.xHigh < xLow || node.xLow > xHigh || node.yHigh < yLow ||
+                    node.yLow > yHigh) {
+                    continue;
+                }
+                if (node.xHigh - node.xLow <= frame.cellX &&
+                    node.yHigh - node.yLow <= frame.cellY) {
+                    landSlot(node.last);
+                    if (selected != nullptr && selected->last[index] != kNoSlot &&
+                        selected->last[index] != node.last) {
+                        landSlot(selected->last[index]);
+                    }
+                    continue;
+                }
+                if (node.children() == 0) {
+                    for (std::uint32_t s = node.first; s < node.first + node.count; ++s) {
+                        ++part.points;
+                        const double x = pointPosition(tree.x[s], tree.xLog);
+                        const double y = pointPosition(tree.y[s], tree.yLog);
+                        if (x >= frame.xLow && x <= frame.xHigh && y >= frame.yLow &&
+                            y <= frame.yHigh) {
+                            land(s, x, y);
+                        }
+                    }
+                    continue;
+                }
+                for (std::uint32_t c = node.child() + node.children(); c-- > node.child();) {
+                    stack.push_back(c);
+                }
+            }
+        });
+        for (const PointWalk& part : walks) {
+            counted.nodes += part.nodes;
+            counted.points += part.points;
+            counted.candidates += part.candidates;
+        }
+    }
+
+    // What every cell kept, emptied for the next frame as it goes, and what
+    // this frame knows whole left for the next: an element and a slot, which
+    // are one key, an element being unique.
+    const bool remember = memory != nullptr && !whole.empty();
+    if (remember) {
+        memory->words.assign(
+            static_cast<std::size_t>((whole.x1 - whole.x0) * (whole.y1 - whole.y0)), 0);
+    }
     const long long bands = std::clamp<long long>(ny / 32, 1, 64);
-    struct Band
+    struct Kept
     {
         std::vector<std::uint64_t> plain;
         std::vector<std::uint64_t> chosen;
-        PointWalk walk;
     };
-    std::vector<Band> parts(static_cast<std::size_t>(bands));
+    std::vector<Kept> parts(static_cast<std::size_t>(bands));
     parallelFor(bands, [&](long long b) {
-        Band& band = parts[static_cast<std::size_t>(b)];
-        const long long r0 = ny * b / bands;
-        const long long r1 = ny * (b + 1) / bands;
-        // The positions the band covers, a cell wider either way, for passing
-        // over whatever cannot reach it; what lands is held to its rows.
-        const double bandLow = b == 0 ? -std::numeric_limits<double>::infinity()
-                                      : static_cast<double>(y0 + r0 - 1) * frame.cellY;
-        const double bandHigh = b == bands - 1 ? std::numeric_limits<double>::infinity()
-                                               : static_cast<double>(y0 + r1 + 1) * frame.cellY;
-        const double yLow = std::max(frame.yLow, bandLow);
-        const double yHigh = std::min(frame.yHigh, bandHigh);
-        PointWalk& counted = band.walk;
-        std::uint64_t* cells = scratch.cells.data();
-        const auto land = [&](std::uint32_t slot, double x, double y) {
-            ++counted.candidates;
-            const long long row = floorOf(y * perY) - y0;
-            const long long column = floorOf(x * perX) - x0;
-            if (row < r0 || row >= r1 || column < 0 || column >= nx) {
-                return;
-            }
-            std::uint64_t& held = cells[row * nx + column];
-            held = std::max(held, wordOf(slot));
-        };
-        const auto landSlot = [&](std::uint32_t slot) {
-            land(slot, pointPosition(tree.x[slot], tree.xLog),
-                 pointPosition(tree.y[slot], tree.yLog));
-        };
-        std::vector<std::uint32_t> stack{0};
-        while (!stack.empty()) {
-            const std::uint32_t index = stack.back();
-            stack.pop_back();
-            const PointNode& node = tree.nodes[index];
-            ++counted.nodes;
-            if (node.xHigh < frame.xLow || node.xLow > frame.xHigh || node.yHigh < yLow ||
-                node.yLow > yHigh) {
-                continue;
-            }
-            if (node.xHigh - node.xLow <= frame.cellX && node.yHigh - node.yLow <= frame.cellY) {
-                landSlot(node.last);
-                if (selected != nullptr && selected->last[index] != kNoSlot &&
-                    selected->last[index] != node.last) {
-                    landSlot(selected->last[index]);
+        Kept& part = parts[static_cast<std::size_t>(b)];
+        for (long long row = ny * b / bands; row < ny * (b + 1) / bands; ++row) {
+            const long long y = y0 + row;
+            const bool inWhole = remember && y >= whole.y0 && y < whole.y1;
+            for (long long column = 0; column < nx; ++column) {
+                std::uint64_t& cell = cells[row * nx + column];
+                const std::uint64_t word = cell;
+                if (word == 0) {
+                    continue;
                 }
-                continue;
-            }
-            if (node.children() == 0) {
-                for (std::uint32_t s = node.first; s < node.first + node.count; ++s) {
-                    ++counted.points;
-                    const double x = pointPosition(tree.x[s], tree.xLog);
-                    const double y = pointPosition(tree.y[s], tree.yLog);
-                    if (x >= frame.xLow && x <= frame.xHigh && y >= yLow && y <= yHigh) {
-                        land(s, x, y);
-                    }
+                cell = 0;
+                const long long x = x0 + column;
+                if (inWhole && x >= whole.x0 && x < whole.x1) {
+                    memory->words[static_cast<std::size_t>((y - whole.y0) * (whole.x1 - whole.x0) +
+                                                           (x - whole.x0))] = word;
                 }
-                continue;
+                const std::uint64_t key = (word & ~(std::uint64_t{1} << 63)) - 1;
+                ((word >> 63) != 0 ? part.chosen : part.plain).push_back(key);
             }
-            for (std::uint32_t c = node.child() + node.children(); c-- > node.child();) {
-                stack.push_back(c);
-            }
-        }
-        // What the band's cells kept, emptied for the next frame as it goes:
-        // an element and a slot, which are one key, an element being unique.
-        for (std::uint64_t* cell = cells + r0 * nx; cell < cells + r1 * nx; ++cell) {
-            const std::uint64_t word = *cell;
-            if (word == 0) {
-                continue;
-            }
-            *cell = 0;
-            const std::uint64_t key = (word & ~(std::uint64_t{1} << 63)) - 1;
-            ((word >> 63) != 0 ? band.chosen : band.plain).push_back(key);
         }
     });
+    if (memory != nullptr) {
+        memory->valid = remember;
+        memory->cellX = frame.cellX;
+        memory->cellY = frame.cellY;
+        memory->generation = tree.generation;
+        memory->chosen = chosenKey;
+        memory->x0 = whole.x0;
+        memory->x1 = whole.x1;
+        memory->y0 = whole.y0;
+        memory->y1 = whole.y1;
+    }
 
     // In the order it is drawn: the points nobody chose, by element, then the
     // chosen ones, by element.
     std::vector<std::uint64_t>& plain = scratch.order;
     std::vector<std::uint64_t> chosen;
     plain.clear();
-    PointWalk counted;
-    for (Band& band : parts) {
-        counted.nodes += band.walk.nodes;
-        counted.points += band.walk.points;
-        counted.candidates += band.walk.candidates;
-        plain.insert(plain.end(), band.plain.begin(), band.plain.end());
-        chosen.insert(chosen.end(), band.chosen.begin(), band.chosen.end());
+    for (Kept& part : parts) {
+        plain.insert(plain.end(), part.plain.begin(), part.plain.end());
+        chosen.insert(chosen.end(), part.chosen.begin(), part.chosen.end());
     }
     sortHigh(plain, scratch.spare);
     sortHigh(chosen, scratch.spare);
@@ -1020,8 +1113,46 @@ void paintDiscs(std::span<const Point> centres, std::span<const Rgba> colours, d
     }
     const double r = std::max(radius, 0.5);
     const double reach = r + 0.5;
-    const double outside = reach * reach;
-    const double inside = r > 0.5 ? (reach - 1.0) * (reach - 1.0) : 0.0;
+
+    // A disc's coverage worked out once for each sixteenth of a pixel its
+    // centre can stand at, across and down, with each row's run of covered
+    // pixels: a disc is then the stamp its centre asks for, copied. Worked out
+    // a pixel at a time, with a root for every pixel on an edge and a span for
+    // every row, a disc of two pixels cost two and a half times as much. Where
+    // the centre is rounded to, a thirty-second of a pixel at most, moves the
+    // edge by that and nothing else. A large dot is stamped from four steps a
+    // pixel, so the stamps stay a few megabytes.
+    const int steps = r > 16.0 ? 4 : 16;
+    const int around = static_cast<int>(std::ceil(reach));
+    const int side = 2 * around + 2;
+    const auto stampSize = static_cast<std::size_t>(side) * static_cast<std::size_t>(side);
+    std::vector<float> stamps(static_cast<std::size_t>(steps * steps) * stampSize, 0.0F);
+    std::vector<std::int16_t> spans(static_cast<std::size_t>(steps * steps * side) * 2, 0);
+    for (int qy = 0; qy < steps; ++qy) {
+        for (int qx = 0; qx < steps; ++qx) {
+            const std::size_t stamp = static_cast<std::size_t>(qy * steps + qx);
+            float* cover = &stamps[stamp * stampSize];
+            std::int16_t* span = &spans[stamp * static_cast<std::size_t>(side) * 2];
+            const double ox = (qx + 0.5) / steps;
+            const double oy = (qy + 0.5) / steps;
+            for (int j = 0; j < side; ++j) {
+                int from = side;
+                int to = -1;
+                const double dy = static_cast<double>(j - around) + 0.5 - oy;
+                for (int i = 0; i < side; ++i) {
+                    const double dx = static_cast<double>(i - around) + 0.5 - ox;
+                    const double c = std::clamp(reach - std::sqrt(dx * dx + dy * dy), 0.0, 1.0);
+                    cover[j * side + i] = static_cast<float>(c);
+                    if (c > 0.0) {
+                        from = std::min(from, i);
+                        to = std::max(to, i);
+                    }
+                }
+                span[2 * j] = static_cast<std::int16_t>(from);
+                span[2 * j + 1] = static_cast<std::int16_t>(to);
+            }
+        }
+    }
 
     // Which discs touch each band of rows, in the order given.
     constexpr std::size_t kBand = 32;
@@ -1095,13 +1226,23 @@ void paintDiscs(std::span<const Point> centres, std::span<const Rgba> colours, d
             const Point& c = centres[i];
             const Rgba& colour = colours.size() == 1 ? colours[0] : colours[i];
             const auto alpha = static_cast<float>(std::clamp(colour.alpha, 0.0, 1.0));
-            const long long x0 = std::max<long long>(floorOf(c.x() - reach), 0);
+            const long long cx = floorOf(c.x());
+            const long long cy = floorOf(c.y());
+            const int qx =
+                std::min(steps - 1, static_cast<int>((c.x() - static_cast<double>(cx)) * steps));
+            const int qy =
+                std::min(steps - 1, static_cast<int>((c.y() - static_cast<double>(cy)) * steps));
+            const std::size_t stamp = static_cast<std::size_t>(qy * steps + qx);
+            const float* cover = &stamps[stamp * stampSize];
+            const std::int16_t* span = &spans[stamp * static_cast<std::size_t>(side) * 2];
+            const long long left = cx - around;
+            const long long top = cy - around;
+            const long long x0 = std::max<long long>(left, 0);
             const long long x1 =
-                std::min<long long>(floorOf(c.x() + reach), static_cast<long long>(w) - 1);
-            const long long y0 =
-                std::max<long long>(floorOf(c.y() - reach), static_cast<long long>(rowFrom));
+                std::min<long long>(left + side - 1, static_cast<long long>(w) - 1);
+            const long long y0 = std::max<long long>(top, static_cast<long long>(rowFrom));
             const long long y1 =
-                std::min<long long>(floorOf(c.y() + reach), static_cast<long long>(rowTo) - 1);
+                std::min<long long>(top + side - 1, static_cast<long long>(rowTo) - 1);
             if (x1 < x0 || y1 < y0) {
                 continue;
             }
@@ -1122,30 +1263,17 @@ void paintDiscs(std::span<const Point> centres, std::span<const Rgba> colours, d
             const auto green = static_cast<float>(colour.green);
             const auto blue = static_cast<float>(colour.blue);
             for (long long py = y0; py <= y1; ++py) {
-                const double dy = static_cast<double>(py) + 0.5 - c.y();
-                const double across = outside - dy * dy;
-                if (!(across > 0.0)) {
-                    continue;
-                }
-                // The pixels of this row whose middles are inside the disc's
-                // reach, worked out once rather than asked of every pixel: a
-                // pixel at a time, the question mispredicted at every edge.
-                const double half = std::sqrt(across);
-                const long long from = std::max(x0, floorOf(c.x() - 0.5 - half) + 1);
-                const long long to = std::min(x1, floorOf(c.x() - 0.5 + half));
+                const auto j = static_cast<int>(py - top);
+                const long long from = std::max<long long>(left + span[2 * j], x0);
+                const long long to = std::min<long long>(left + span[2 * j + 1], x1);
                 const std::size_t row = static_cast<std::size_t>(py) - rowFrom;
+                const float* covered = cover + j * side - left;
                 float* pixel = &ink[4 * (row * w + static_cast<std::size_t>(std::max(from, 0LL)))];
                 for (long long px = from; px <= to; ++px, pixel += 4) {
                     if (pixel[3] >= kOpaque) {
                         continue;
                     }
-                    const double dx = static_cast<double>(px) + 0.5 - c.x();
-                    const double d = dx * dx + dy * dy;
-                    const float cover =
-                        d <= inside
-                            ? 1.0F
-                            : std::clamp(static_cast<float>(reach - std::sqrt(d)), 0.0F, 1.0F);
-                    const float a = alpha * cover * (1.0F - pixel[3]);
+                    const float a = alpha * covered[px] * (1.0F - pixel[3]);
                     pixel[0] += red * a;
                     pixel[1] += green * a;
                     pixel[2] += blue * a;

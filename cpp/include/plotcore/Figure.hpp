@@ -782,6 +782,9 @@ public:
     /// Counts every change of any selection, by a gesture or by a call: what a
     /// host compares to know whether to ask again.
     [[nodiscard]] std::uint64_t selectionVersion() const { return selectionVersion_; }
+    /// What drawing scatters has visited, summed over every frame: what the
+    /// tests and the bench hold the walk to, as Plot::columnsFolded.
+    [[nodiscard]] const PointWalk& pointsWalked() const { return pointsWalked_; }
 
     // --- a view, written down ------------------------------------------------
     /// The settings, every line's settings and the window, as JSON.
@@ -916,6 +919,10 @@ private:
     /// double click puts back: its first click was not a selection.
     std::optional<std::map<int, Chosen>> beforeClick_;
     PointScratch pointScratch_;
+    /// What each scatter's last frame on the pane knew whole, by the line's
+    /// number, so a pan walks only what it uncovers.
+    std::map<int, PointMemory> pointMemory_;
+    PointWalk pointsWalked_;
     FigureStyle style_;
     TextMeasure measure_;
     bool approximate_ = true;

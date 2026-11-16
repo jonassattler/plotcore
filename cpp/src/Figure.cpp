@@ -6,6 +6,7 @@
 
 #include "Json.hpp"
 #include "plotcore/Format.hpp"
+#include "plotcore/Parallel.hpp"
 #include "plotcore/Projection.hpp"
 #include "plotcore/Scatter.hpp"
 
@@ -415,6 +416,7 @@ void Figure::resetView()
 void Figure::setSource(LineSource* source)
 {
     source_ = source;
+    pointMemory_.clear();
     // A drag holds a line by its number, and the numbers are the old source's.
     drag_ = Drag::None;
     banding_ = false;
@@ -462,6 +464,13 @@ void Figure::removeLine(int line)
     }
     selections_ = std::move(kept);
     beforeClick_.reset();
+    std::map<int, PointMemory> remembered;
+    for (auto& [number, memory] : pointMemory_) {
+        if (number != line) {
+            remembered.emplace(number > line ? number - 1 : number, std::move(memory));
+        }
+    }
+    pointMemory_ = std::move(remembered);
 }
 
 void Figure::clear()
@@ -470,6 +479,7 @@ void Figure::clear()
     lines_.clear();
     clearSelection();
     beforeClick_.reset();
+    pointMemory_.clear();
     settings_.highlighted = -1;
     drag_ = Drag::None;
     banding_ = false;
@@ -1111,6 +1121,29 @@ std::vector<Rgba> colourStops(const FigureSettings& settings)
     return stops;
 }
 
+/// `each(k)` for every `k` below `count`, spread over the pool in pieces: what a
+/// frame works out of every point it draws -- where it is and what colour --
+/// is half a million logarithms on a dense pane on logarithmic axes, and on
+/// one thread that was most of the frame.
+template<typename Each>
+void eachOf(std::size_t count, Each&& each)
+{
+    constexpr std::size_t kPiece = 16384;
+    if (count <= kPiece) {
+        for (std::size_t k = 0; k < count; ++k) {
+            each(k);
+        }
+        return;
+    }
+    parallelFor(static_cast<long long>((count + kPiece - 1) / kPiece), [&](long long piece) {
+        const std::size_t from = static_cast<std::size_t>(piece) * kPiece;
+        const std::size_t to = std::min(count, from + kPiece);
+        for (std::size_t k = from; k < to; ++k) {
+            each(k);
+        }
+    });
+}
+
 /// Bits set in a selection's words.
 long long bitsIn(const std::vector<std::uint64_t>& bits)
 {
@@ -1266,7 +1299,15 @@ void Figure::drawScatter(int position, const PlotView& upright, const PlotView& 
     frame.yHigh = yMap.high + reach * frame.cellY;
     const PointSelection* chosen = selectionOf(index, *tree);
     std::vector<std::uint32_t> slots;
-    drawnPoints(*tree, chosen, frame, pointScratch_, slots);
+    PointWalk walked;
+    // The pane's frames remember what they knew whole, for the next pan; a
+    // picture's grid is its own, and neither takes from them nor leaves them.
+    drawnPoints(*tree, chosen, frame, pointScratch_, slots, &walked,
+                request.picture ? nullptr : &pointMemory_[index], selectionVersion_);
+    pointsWalked_.nodes += walked.nodes;
+    pointsWalked_.points += walked.points;
+    pointsWalked_.candidates += walked.candidates;
+    pointsWalked_.drawn += walked.drawn;
 
     // Each point's colour: its own, or its value through the colour axis, or
     // the scatter's -- at the scatter's strength, and at the strength a line
@@ -1285,8 +1326,9 @@ void Figure::drawScatter(int position, const PlotView& upright, const PlotView& 
             mappingOver(low, high, settings_.colourLog, settings_.colourLogBase);
         const std::vector<Rgba> stops = valued ? colourStops(settings_) : std::vector<Rgba>{};
         const double dimmed = seriesOpacity(0, 2, 1, false, settings_.dark && !settings_.paper);
-        colours.reserve(slots.size());
-        for (const std::uint32_t slot : slots) {
+        colours.resize(slots.size());
+        eachOf(slots.size(), [&](std::size_t k) {
+            const std::uint32_t slot = slots[k];
             Rgba c = colour;
             if (own) {
                 const std::uint8_t* rgba = &tree->rgba[4 * std::size_t{slot}];
@@ -1302,22 +1344,22 @@ void Figure::drawScatter(int position, const PlotView& upright, const PlotView& 
             if (chosen != nullptr && !chosen->has(slot)) {
                 c.alpha *= dimmed;
             }
-            colours.push_back(c);
-        }
+            colours[k] = c;
+        });
     }
 
     // Where each is, on the pane: placed upright, as everything is, and turned
     // onto a flipped pane after.
-    std::vector<Point> centres;
-    centres.reserve(slots.size());
-    for (const std::uint32_t slot : slots) {
+    std::vector<Point> centres(slots.size());
+    eachOf(slots.size(), [&](std::size_t k) {
+        const std::uint32_t slot = slots[k];
         Point at(xMap.fractionOf(tree->x[slot]) * view.width,
                  view.height - yMap.fractionOf(tree->y[slot]) * view.height);
         if (pane.transposed) {
             at = transposedPoint(at, pane);
         }
-        centres.emplace_back(at.x() + lay.area.x, at.y() + lay.area.y);
-    }
+        centres[k] = Point(at.x() + lay.area.x, at.y() + lay.area.y);
+    });
 
     const int scatters =
         static_cast<int>(std::count_if(drawn_.begin(), drawn_.end(), [](const Drawn& line) {

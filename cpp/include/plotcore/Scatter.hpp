@@ -59,7 +59,7 @@
 // Held against every point painted, in the order handed over and coloured by
 // a value through a ramp, what the walk draws differs by more than an eighth
 // in any channel in 0.86% of the covered pixels of a 640 by 400 pane at forty
-// thousand points, and in 0.48% at four hundred thousand: where a cell holds
+// thousand points, and in 0.47% at four hundred thousand: where a cell holds
 // two points of different colours and the later one stood a cell over.
 //
 // What a frame costs is the nodes it visits. In a view zoomed alike on both
@@ -93,12 +93,15 @@ inline constexpr int kPointLeaf = 8;
 
 /// The most points one frame draws as markers, over every scatter together.
 ///
-/// A marker is a dot a host paints, and the slowest host paints one in about a
-/// microsecond: QPainter's antialiased ellipse. Past this many a scatter is
-/// drawn as an image of the pane instead (PaneImage), which costs the host one
-/// blit however many points it holds. Shared between the scatters as
-/// kMaxVertices is shared between the lines (maxMarkersFor).
-inline constexpr int kMaxMarkers = 1 << 14;
+/// A marker is a dot a host paints, and the slowest host paints one in 1.7
+/// microseconds: QPainter's antialiased ellipse, measured with
+/// plotcore-bench-scatter-qt over 200 000 of them. So eight thousand are about
+/// fourteen milliseconds, which is a frame; past that a scatter is drawn as an
+/// image of the pane instead (PaneImage), which costs the host one blit --
+/// under a millisecond through the same painter -- however many points it
+/// holds. Shared between the scatters as kMaxVertices is shared between the
+/// lines (maxMarkersFor).
+inline constexpr int kMaxMarkers = 1 << 13;
 
 /// Each scatter's share of kMaxMarkers.
 [[nodiscard]] inline int maxMarkersFor(int scatters)
@@ -261,11 +264,43 @@ struct PointScratch
     std::vector<std::uint64_t> spare;
 };
 
+/// What one frame of a scatter drew, kept for the next on the same grid: the
+/// last point of every cell wholly inside its window.
+///
+/// Such a cell is known whole -- every node that holds a point in it meets the
+/// window, and was walked -- and what it drew depends on nothing but the grid,
+/// the tree and the selection. So a pan, which keeps the grid, takes those cells
+/// as they are and walks only the cells it uncovers, as a pan folds only the
+/// columns it uncovers for bars (Plot::drawColumns); and what it draws is what
+/// a frame walked whole would, cell for cell.
+struct PointMemory
+{
+    bool valid = false;
+    double cellX = 0.0;
+    double cellY = 0.0;
+    std::uint64_t generation = 0;
+    /// The caller's word for the selection it drew with: another selection is
+    /// another picture.
+    std::uint64_t chosen = 0;
+    /// The cells known whole, `[x0, x1)` across by `[y0, y1)` up, counted from
+    /// position zero; and a word for each, row by row, nothing for an empty one.
+    long long x0 = 0;
+    long long x1 = 0;
+    long long y0 = 0;
+    long long y1 = 0;
+    std::vector<std::uint64_t> words;
+};
+
 /// The points a frame draws, as slots, in the order they are drawn: at most
 /// one a cell, the last of what lands in it, and every point the header
 /// promises. `selection` is null, or the selection as this tree sees it.
+///
+/// With `memory`, what the last frame on this grid knew whole is taken from it
+/// and not walked again, and what this frame knows whole is left in it.
+/// `chosen` names the selection, so a memory of another is not taken.
 void drawnPoints(const PointTree& tree, const PointSelection* selection, const PointFrame& frame,
-                 PointScratch& scratch, std::vector<std::uint32_t>& out, PointWalk* walk = nullptr);
+                 PointScratch& scratch, std::vector<std::uint32_t>& out, PointWalk* walk = nullptr,
+                 PointMemory* memory = nullptr, std::uint64_t chosen = 0);
 
 /// The point under a pointer, as a slot, and how far it is from it.
 struct PointPick
@@ -304,7 +339,9 @@ long long pointsInside(const PointTree& tree, double xLow, double xHigh, double 
 ///
 /// A pixel is covered by a disc by `r + 1/2 - d`, its distance `d` from the
 /// centre, clamped to 0..1: the antialiased edge a host's own circle has, so a
-/// scatter drawn as an image is the scatter drawn as markers. Spread over the
+/// scatter drawn as an image is the scatter drawn as markers. The centre is
+/// taken to the nearest sixteenth of a pixel, from which the coverage is
+/// stamped rather than worked out again. Spread over the
 /// pool in bands of rows, each band taking its discs in the order given, so
 /// the image is the same whatever the number of threads.
 void paintDiscs(std::span<const Point> centres, std::span<const Rgba> colours, double radius,
