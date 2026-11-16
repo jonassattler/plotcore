@@ -25,10 +25,18 @@
 // sixty-four rows of ten thousand -- so a line also says which *series* it
 // is: the number the palette colours it by and the legend names it by, which
 // does not move when a line before it is left out. See series().
+//
+// A line may also be a scatter: points given by an x and a y each, drawn as
+// dots (Scatter.hpp). It is a line of another kind and not a second sort of
+// thing, so it is numbered with the lines, coloured and named by its series,
+// moved, scaled, stacked and hidden as a line is, and the axes are drawn over
+// both. What a figure asks of one is its extent, as of any line, and its points
+// (drawPoints); a source with no scatters answers neither, and has none.
 
 #include "plotcore/Camera.hpp"
 #include "plotcore/Levels.hpp"
 #include "plotcore/Projection.hpp"
+#include "plotcore/Scatter.hpp"
 
 #include <string>
 
@@ -57,6 +65,14 @@ struct DrawnColumns
     /// is.
     const unsigned char* kinds = nullptr;
     int count = 0;
+};
+
+/// What a line is: elements along an x the plot gives them, or points that
+/// each carry an x of their own.
+enum class LineKind
+{
+    Line,
+    Points,
 };
 
 class LineSource
@@ -127,6 +143,37 @@ public:
         (void)line;
         (void)grid;
         return {};
+    }
+
+    // --- points ------------------------------------------------------------------
+    /// Which kind of line this is. Every line of a source that has no scatters
+    /// is a line.
+    [[nodiscard]] virtual LineKind kind(int line) const
+    {
+        (void)line;
+        return LineKind::Line;
+    }
+    /// What a scatter's points are coloured by, as an extent: the colour axis
+    /// is drawn against these, as the y axis is against `extent`. Asked once
+    /// per scatter per frame; not finite for one with no values.
+    [[nodiscard]] virtual LineExtent valueExtent(int line) const
+    {
+        (void)line;
+        return {};
+    }
+    /// A scatter's points, in a tree over the scales asked, or null for a line
+    /// that is not one. The tree is the source's and stays valid until the
+    /// source is next asked something that is not const.
+    ///
+    /// A question and not news, as drawColumns is: it may order the points
+    /// again for scales it was not ordered for, which is arithmetic over what
+    /// is held, and reads nothing.
+    [[nodiscard]] virtual const PointTree* drawPoints(int line, bool xLog, bool yLog) const
+    {
+        (void)line;
+        (void)xLog;
+        (void)yLog;
+        return nullptr;
     }
 };
 

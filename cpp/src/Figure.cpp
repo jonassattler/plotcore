@@ -7,8 +7,10 @@
 #include "Json.hpp"
 #include "plotcore/Format.hpp"
 #include "plotcore/Projection.hpp"
+#include "plotcore/Scatter.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <limits>
 
@@ -301,6 +303,14 @@ struct Figure::Layout
     double commonWidth = 0.0;
     double footHeight = 0.0;
 
+    /// The colour axis, while its bar is drawn: what it runs between, its
+    /// numbers, and how wide the column right of the pane is that holds it.
+    bool colourBar = false;
+    double colourLow = 0.0;
+    double colourHigh = 1.0;
+    TickSet colourTicks;
+    double colourWidest = 0.0;
+
     struct Side
     {
         int line = -1;
@@ -359,6 +369,9 @@ void Figure::setSettings(const FigureSettings& settings)
     }
     if (!usableBase(next.yLogBase)) {
         next.yLogBase = settings_.yLogBase;
+    }
+    if (!usableBase(next.colourLogBase)) {
+        next.colourLogBase = settings_.colourLogBase;
     }
     const bool reset = next.xLog != settings_.xLog || next.yLog != settings_.yLog ||
                        next.flipped != settings_.flipped ||
@@ -437,12 +450,26 @@ void Figure::removeLine(int line)
     else if (dragLine_ > line) {
         --dragLine_;
     }
+    // A selection is kept by the line's number, so those after it move down.
+    std::map<int, Chosen> kept;
+    for (auto& [number, chosen] : selections_) {
+        if (number != line) {
+            kept.emplace(number > line ? number - 1 : number, std::move(chosen));
+        }
+    }
+    if (kept.size() != selections_.size()) {
+        ++selectionVersion_;
+    }
+    selections_ = std::move(kept);
+    beforeClick_.reset();
 }
 
 void Figure::clear()
 {
     plot_.clear();
     lines_.clear();
+    clearSelection();
+    beforeClick_.reset();
     settings_.highlighted = -1;
     drag_ = Drag::None;
     banding_ = false;
@@ -499,7 +526,10 @@ void Figure::refresh()
             continue;
         }
         longest = std::max(longest, length);
-        drawn_.push_back(Drawn{i, lines.extent(i), lines.xExtent(i), lines.xPositiveMinimum(i)});
+        const LineKind kind = lines.kind(i);
+        drawn_.push_back(Drawn{i, lines.extent(i), lines.xExtent(i), lines.xPositiveMinimum(i),
+                               kind,
+                               kind == LineKind::Points ? lines.valueExtent(i) : LineExtent{}});
     }
 
     double xMin = kInfinity;
@@ -764,7 +794,25 @@ Figure::Layout Figure::layout() const
                           : std::max(s.labelMargin, std::ceil(widest) + s.gapM) +
                                 (leftName.empty() ? 0.0 : std::ceil(lay.nameHeight) + s.gapXS);
     const double left = sideWidth + lay.commonWidth;
-    const double right = s.s9;
+    // The colour bar's column, right of the pane: a gap, the bar, a tick, a
+    // gap, its numbers and its name -- or the plain gutter, without a bar.
+    double right = s.s9;
+    if (settings_.colourBar && colourWindow(lay.colourLow, lay.colourHigh)) {
+        lay.colourBar = true;
+        lay.colourTicks = tickValues(lay.colourLow, lay.colourHigh, settings_.colourLog,
+                                     settings_.colourLogBase, areaHeight, true, ticks);
+        for (const TickLabel& label : lay.colourTicks.texts) {
+            lay.colourWidest = std::max(
+                lay.colourWidest,
+                measure_.width(label.base, TextRole::Tick) +
+                    (label.exponent.empty() ? 0.0
+                                            : measure_.width(label.exponent, TextRole::TickMinor)));
+        }
+        right = std::max(
+            right, s.gapM + s.legendSwatch + s.s3 + s.gapS + std::ceil(lay.colourWidest) +
+                       (settings_.colourLabel.empty() ? 0.0 : s.gapS + std::ceil(lay.nameHeight)) +
+                       s.gapM);
+    }
     lay.area = PaneRect{left, top, std::max(1.0, width_ - left - right), areaHeight};
 
     // The numbers along the foot, measured across it.
@@ -802,7 +850,13 @@ PlotView Figure::paneView(const Layout& lay) const
     pane.height = lay.area.height;
     pane.pixelRatio = pixelRatio_;
     pane.transposed = settings_.flipped;
-    pane.maxColumns = maxColumnsFor(static_cast<int>(drawn_.size()));
+    // The vertices are the lines'; a scatter's dots have a budget of their own
+    // (kMaxMarkers).
+    int strokes = 0;
+    for (const Drawn& line : drawn_) {
+        strokes += line.kind == LineKind::Line ? 1 : 0;
+    }
+    pane.maxColumns = maxColumnsFor(strokes);
     return pane;
 }
 
@@ -895,6 +949,31 @@ bool drawingOf(const std::string& name, LineDrawing& out)
     for (const LineDrawing drawing :
          {LineDrawing::Stroke, LineDrawing::Bars, LineDrawing::Adaptive}) {
         if (name == drawingName(drawing)) {
+            out = drawing;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char* pointDrawingName(PointDrawing drawing)
+{
+    switch (drawing) {
+    case PointDrawing::Markers:
+        return "markers";
+    case PointDrawing::Image:
+        return "image";
+    case PointDrawing::Adaptive:
+        break;
+    }
+    return "adaptive";
+}
+
+bool pointDrawingOf(const std::string& name, PointDrawing& out)
+{
+    for (const PointDrawing drawing :
+         {PointDrawing::Markers, PointDrawing::Image, PointDrawing::Adaptive}) {
+        if (name == pointDrawingName(drawing)) {
             out = drawing;
             return true;
         }
@@ -1016,6 +1095,477 @@ bool Figure::barsOf(int index, const PlotLine& line, const PlotView& view, bool 
     return true;
 }
 
+// --- scatters ---------------------------------------------------------------------
+
+namespace {
+
+/// The colour axis's map: the ramp named, or viridis for a name that is not
+/// one, its stops turned round when it is reversed.
+std::vector<Rgba> colourStops(const FigureSettings& settings)
+{
+    std::vector<Rgba> stops =
+        ramp(settings.colourMap).value_or(ramp("viridis").value_or(std::vector<Rgba>{}));
+    if (settings.colourReversed) {
+        std::reverse(stops.begin(), stops.end());
+    }
+    return stops;
+}
+
+/// Bits set in a selection's words.
+long long bitsIn(const std::vector<std::uint64_t>& bits)
+{
+    long long count = 0;
+    for (const std::uint64_t word : bits) {
+        count += std::popcount(word);
+    }
+    return count;
+}
+
+} // namespace
+
+bool Figure::colourWindow(double& low, double& high) const
+{
+    // Run over the values of every drawn scatter coloured by them, as the y
+    // axis runs over every line's extent -- or over the window chosen.
+    bool any = false;
+    double least = kInfinity;
+    double most = -kInfinity;
+    double positive = 0.0;
+    for (const Drawn& line : drawn_) {
+        if (line.kind != LineKind::Points || !line.values.finite) {
+            continue;
+        }
+        any = true;
+        least = std::min(least, line.values.minimum);
+        most = std::max(most, line.values.maximum);
+        if (line.values.positive && (positive == 0.0 || line.values.positiveMinimum < positive)) {
+            positive = line.values.positiveMinimum;
+        }
+    }
+    if (!any) {
+        return false;
+    }
+    const bool log = settings_.colourLog;
+    const double base = settings_.colourLogBase;
+    if (settings_.colourHigh > settings_.colourLow && (!log || settings_.colourLow > 0.0)) {
+        low = settings_.colourLow;
+        high = settings_.colourHigh;
+        return true;
+    }
+    if (log) {
+        if (!(positive > 0.0)) {
+            // Nothing above zero: one empty power of the base, as an axis has.
+            low = 1.0;
+            high = base;
+            return true;
+        }
+        least = positive;
+    }
+    if (!(most > least)) {
+        // One value is no span to run a map over: the unit either side of it,
+        // or half a power of the base either side on a logarithmic axis.
+        low = log ? least / std::sqrt(base) : least - 0.5;
+        high = log ? most * std::sqrt(base) : most + 0.5;
+        return true;
+    }
+    low = least;
+    high = most;
+    return true;
+}
+
+double Figure::dotRadius(int series) const
+{
+    // A highlighted scatter's dots are wider by what a highlighted line's
+    // stroke is wider by: the same affordance, said in the scatter's terms.
+    const FigureStyle& s = style_;
+    return s.markerSize / 2.0 +
+           (seriesWidth(series, settings_.highlighted, s.lineWidth) - s.lineWidth) / 2.0;
+}
+
+PlotView Figure::viewOf(const PlotView& upright, const LineWindow& window) const
+{
+    PlotView view = upright;
+    if (window.own) {
+        view.yMin = window.low;
+        view.yMax = window.high;
+        view.yLog = window.logarithmic;
+    }
+    return view;
+}
+
+const PointSelection* Figure::selectionOf(int line, const PointTree& tree)
+{
+    const auto found = selections_.find(line);
+    if (found == selections_.end() || found->second.count == 0) {
+        return nullptr;
+    }
+    Chosen& chosen = found->second;
+    if (chosen.stale || chosen.onTree.generation != tree.generation) {
+        chosen.onTree = selectionOn(tree, chosen.bits);
+        chosen.stale = false;
+    }
+    return &chosen.onTree;
+}
+
+void Figure::drawScatter(int position, const PlotView& upright, const PlotView& pane,
+                         const LineWindow& window, const Layout& lay, const SceneRequest& request,
+                         DrawnLine& out)
+{
+    const auto count = static_cast<int>(drawn_.size());
+    const int index = drawn_[static_cast<std::size_t>(position)].line;
+    const int series = source().series(index);
+    const FigureStyle& s = style_;
+    const SceneOptions& want = request.geometry;
+    const PlotView view = viewOf(upright, window);
+    const Rgba colour = seriesColor(settings_.colours, series, position, count, settings_.paper,
+                                    settings_.dark, lineSettings(index).colour);
+    // At part strength a scatter shows where its points are and not how many:
+    // a cell draws its last point, and what is under it is not composited
+    // through. Showing how many is a colouring of its own -- by density --
+    // which is not this one.
+    const double opacity = settings_.paper ? 1.0
+                                           : seriesOpacity(series, count, settings_.highlighted,
+                                                           settings_.bundle, settings_.dark);
+    Rgba ink = colour;
+    ink.alpha *= opacity;
+    out.line = index;
+    out.kind = LineKind::Points;
+    out.colour = ink;
+    out.width = seriesWidth(series, settings_.highlighted, s.lineWidth);
+    out.markerRadius = dotRadius(series);
+    out.y = Span{view.yMin, view.yMax};
+    out.yLogarithmic = view.yLog;
+    out.own = window.own;
+    out.numbered = window.own && window.axis;
+
+    const PointTree* tree = source().drawPoints(index, view.xLog, view.yLog);
+    // The tree's logarithms are decimal whatever the axes are numbered in: a
+    // base cancels out of where anything is drawn (Scatter.hpp).
+    const AxisMapping xMap = mappingOver(view.xMin, view.xMax, view.xLog, 10.0);
+    const AxisMapping yMap = mappingOver(view.yMin, view.yMax, view.yLog, 10.0);
+    if (tree == nullptr || tree->empty() || !xMap.usable || !yMap.usable) {
+        return;
+    }
+    const double ratio = std::max(view.pixelRatio, 1.0);
+    const std::optional<ColumnGrid> columns =
+        columnGridFor(view.xMin, view.xMax, view.xLog, 10.0, view.width * ratio);
+    const std::optional<ColumnGrid> rows =
+        columnGridFor(view.yMin, view.yMax, view.yLog, 10.0, view.height * ratio);
+    if (!columns.has_value() || !rows.has_value()) {
+        return;
+    }
+    // The window, widened by as far as a dot reaches past its centre and a
+    // cell more, so a dot standing just off the pane draws its edge on it.
+    const double reach = out.markerRadius * ratio + 1.0;
+    PointFrame frame;
+    frame.cellX = columns->perColumn;
+    frame.cellY = rows->perColumn;
+    frame.xLow = xMap.low - reach * frame.cellX;
+    frame.xHigh = xMap.high + reach * frame.cellX;
+    frame.yLow = yMap.low - reach * frame.cellY;
+    frame.yHigh = yMap.high + reach * frame.cellY;
+    const PointSelection* chosen = selectionOf(index, *tree);
+    std::vector<std::uint32_t> slots;
+    drawnPoints(*tree, chosen, frame, pointScratch_, slots);
+
+    // Each point's colour: its own, or its value through the colour axis, or
+    // the scatter's -- at the scatter's strength, and at the strength a line
+    // that is not highlighted is drawn at when it is not selected and
+    // something of the scatter is.
+    const bool own = !tree->rgba.empty();
+    const bool valued = !own && !tree->values.empty();
+    const bool varied = own || valued || chosen != nullptr;
+    std::vector<Rgba> colours;
+    if (varied) {
+        const Chrome chrome = chromeFor(settings_.dark, settings_.paper);
+        double low = 0.0;
+        double high = 1.0;
+        const bool axis = valued && colourWindow(low, high);
+        const AxisMapping cMap =
+            mappingOver(low, high, settings_.colourLog, settings_.colourLogBase);
+        const std::vector<Rgba> stops = valued ? colourStops(settings_) : std::vector<Rgba>{};
+        const double dimmed = seriesOpacity(0, 2, 1, false, settings_.dark && !settings_.paper);
+        colours.reserve(slots.size());
+        for (const std::uint32_t slot : slots) {
+            Rgba c = colour;
+            if (own) {
+                const std::uint8_t* rgba = &tree->rgba[4 * std::size_t{slot}];
+                c = Rgba::of(rgba[0] / 255.0, rgba[1] / 255.0, rgba[2] / 255.0, rgba[3] / 255.0);
+            }
+            else if (valued) {
+                const double value = tree->values[slot];
+                c = axis && cMap.usable && cMap.draws(value)
+                        ? rampColor(stops, std::clamp(cMap.fractionOf(value), 0.0, 1.0))
+                        : chrome.faint;
+            }
+            c.alpha *= opacity;
+            if (chosen != nullptr && !chosen->has(slot)) {
+                c.alpha *= dimmed;
+            }
+            colours.push_back(c);
+        }
+    }
+
+    // Where each is, on the pane: placed upright, as everything is, and turned
+    // onto a flipped pane after.
+    std::vector<Point> centres;
+    centres.reserve(slots.size());
+    for (const std::uint32_t slot : slots) {
+        Point at(xMap.fractionOf(tree->x[slot]) * view.width,
+                 view.height - yMap.fractionOf(tree->y[slot]) * view.height);
+        if (pane.transposed) {
+            at = transposedPoint(at, pane);
+        }
+        centres.emplace_back(at.x() + lay.area.x, at.y() + lay.area.y);
+    }
+
+    const int scatters =
+        static_cast<int>(std::count_if(drawn_.begin(), drawn_.end(), [](const Drawn& line) {
+            return line.kind == LineKind::Points;
+        }));
+    const bool image =
+        want.images && (settings_.pointDrawing == PointDrawing::Image ||
+                        (settings_.pointDrawing == PointDrawing::Adaptive &&
+                         static_cast<long long>(slots.size()) > maxMarkersFor(scatters)));
+    if (!image) {
+        out.markers = std::move(centres);
+        out.markerColours = std::move(colours);
+        out.markerElements.reserve(slots.size());
+        for (const std::uint32_t slot : slots) {
+            out.markerElements.push_back(tree->element[slot]);
+        }
+        if (want.values) {
+            out.markerValues.reserve(slots.size());
+            for (const std::uint32_t slot : slots) {
+                out.markerValues.emplace_back(tree->x[slot], tree->y[slot]);
+            }
+        }
+        return;
+    }
+
+    // An image of as much of the pane as the dots reach, its corners on device
+    // pixels, the dots painted into it in the order they are drawn.
+    const PaneRect& a = lay.area;
+    const double dot = out.markerRadius + 1.0 / ratio;
+    double left = a.x + a.width;
+    double top = a.y + a.height;
+    double right = a.x;
+    double bottom = a.y;
+    for (const Point& c : centres) {
+        left = std::min(left, c.x() - dot);
+        right = std::max(right, c.x() + dot);
+        top = std::min(top, c.y() - dot);
+        bottom = std::max(bottom, c.y() + dot);
+    }
+    const double x0 = std::floor(std::max(left, a.x) * ratio);
+    const double x1 = std::ceil(std::min(right, a.x + a.width) * ratio);
+    const double y0 = std::floor(std::max(top, a.y) * ratio);
+    const double y1 = std::ceil(std::min(bottom, a.y + a.height) * ratio);
+    if (!(x1 > x0) || !(y1 > y0)) {
+        return;
+    }
+    PaneImage picture;
+    picture.width = static_cast<int>(x1 - x0);
+    picture.height = static_cast<int>(y1 - y0);
+    picture.at = PaneRect{x0 / ratio, y0 / ratio, (x1 - x0) / ratio, (y1 - y0) / ratio};
+    for (Point& c : centres) {
+        c = Point(c.x() * ratio - x0, c.y() * ratio - y0);
+    }
+    if (colours.empty()) {
+        colours.push_back(ink);
+    }
+    paintDiscs(centres, colours, out.markerRadius * ratio, picture.width, picture.height,
+               picture.rgba);
+    out.image = std::move(picture);
+}
+
+Point Figure::placeOn(int position, const PlotView& pane, double x, double y) const
+{
+    const PlotView view = viewOf(uprightView(pane), windowOf(position));
+    const AxisMapping xMap = mappingOver(view.xMin, view.xMax, view.xLog, 10.0);
+    const AxisMapping yMap = mappingOver(view.yMin, view.yMax, view.yLog, 10.0);
+    Point at(xMap.fractionOf(x) * view.width, view.height - yMap.fractionOf(y) * view.height);
+    return pane.transposed ? transposedPoint(at, pane) : at;
+}
+
+std::optional<PointPick> Figure::pickAt(int position, const PlotView& pane, double px, double py,
+                                        double reach, const PointTree** treeOut)
+{
+    const int index = drawn_[static_cast<std::size_t>(position)].line;
+    const PlotView view = viewOf(uprightView(pane), windowOf(position));
+    const PointTree* tree = source().drawPoints(index, view.xLog, view.yLog);
+    if (treeOut != nullptr) {
+        *treeOut = tree;
+    }
+    const AxisMapping xMap = mappingOver(view.xMin, view.xMax, view.xLog, 10.0);
+    const AxisMapping yMap = mappingOver(view.yMin, view.yMax, view.yLog, 10.0);
+    if (tree == nullptr || tree->empty() || !xMap.usable || !yMap.usable || !(view.width > 0.0) ||
+        !(view.height > 0.0)) {
+        return std::nullopt;
+    }
+    Point at(px, py);
+    if (pane.transposed) {
+        at = uprightPoint(at, pane);
+    }
+    const double spanX = xMap.high - xMap.low;
+    const double spanY = yMap.high - yMap.low;
+    const double x = xMap.low + at.x() / view.width * spanX;
+    const double y = yMap.low + (1.0 - at.y() / view.height) * spanY;
+    PointFrame window;
+    window.xLow = xMap.low;
+    window.xHigh = xMap.high;
+    window.yLow = yMap.low;
+    window.yHigh = yMap.high;
+    return pickPoint(*tree, selectionOf(index, *tree), x, y, view.width / spanX,
+                     view.height / spanY, dotRadius(source().series(index)), reach, &window);
+}
+
+std::vector<long long> Figure::selection(int line) const
+{
+    std::vector<long long> out;
+    const auto found = selections_.find(line);
+    if (found == selections_.end()) {
+        return out;
+    }
+    const std::vector<std::uint64_t>& bits = found->second.bits;
+    out.reserve(static_cast<std::size_t>(found->second.count));
+    for (std::size_t word = 0; word < bits.size(); ++word) {
+        std::uint64_t held = bits[word];
+        while (held != 0) {
+            const int bit = std::countr_zero(held);
+            out.push_back(static_cast<long long>(word * 64 + static_cast<std::size_t>(bit)));
+            held &= held - 1;
+        }
+    }
+    return out;
+}
+
+long long Figure::selectionCount(int line) const
+{
+    const auto found = selections_.find(line);
+    return found == selections_.end() ? 0 : found->second.count;
+}
+
+void Figure::setSelection(int line, std::span<const long long> elements)
+{
+    if (line < 0) {
+        return;
+    }
+    const long long length = line < source().lineCount() && source().kind(line) == LineKind::Points
+                                 ? source().length(line)
+                                 : 0;
+    Chosen chosen;
+    chosen.bits.assign(static_cast<std::size_t>((length + 63) / 64), 0);
+    for (const long long element : elements) {
+        if (element >= 0 && element < length) {
+            chosen.bits[static_cast<std::size_t>(element >> 6)] |= std::uint64_t{1}
+                                                                   << (element & 63);
+        }
+    }
+    chosen.count = bitsIn(chosen.bits);
+    if (chosen.count > 0) {
+        selections_[line] = std::move(chosen);
+    }
+    else {
+        selections_.erase(line);
+    }
+    ++selectionVersion_;
+}
+
+void Figure::clearSelection()
+{
+    if (!selections_.empty()) {
+        selections_.clear();
+        ++selectionVersion_;
+    }
+}
+
+void Figure::selectClick(double px, double py, bool toggle)
+{
+    const bool scatters = std::any_of(drawn_.begin(), drawn_.end(), [](const Drawn& line) {
+        return line.kind == LineKind::Points;
+    });
+    if (!scatters) {
+        return; // a click on a plot of lines selects nothing, and clears nothing
+    }
+    const std::optional<Picked> picked = pointAt(px, py, 12.0, true);
+    beforeClick_ = selections_;
+    if (!picked.has_value()) {
+        if (!toggle) {
+            clearSelection();
+        }
+        return;
+    }
+    if (!toggle) {
+        selections_.clear();
+    }
+    Chosen& chosen = selections_[picked->line];
+    const long long length = source().length(picked->line);
+    chosen.bits.resize(static_cast<std::size_t>((length + 63) / 64), 0);
+    const auto word = static_cast<std::size_t>(picked->element >> 6);
+    const std::uint64_t bit = std::uint64_t{1} << (picked->element & 63);
+    if (toggle) {
+        chosen.bits[word] ^= bit;
+    }
+    else {
+        chosen.bits[word] |= bit;
+    }
+    chosen.count = bitsIn(chosen.bits);
+    chosen.stale = true;
+    if (chosen.count == 0) {
+        selections_.erase(picked->line);
+    }
+    ++selectionVersion_;
+}
+
+void Figure::selectBand(Point from, Point to, bool adding)
+{
+    // The band as the zoom takes it: clamped to the pane, in its pixels.
+    const PaneRect& a = camera_.area;
+    const auto paneX = [&](double x) { return std::clamp(x - a.x, 0.0, a.width); };
+    const auto paneY = [&](double y) { return std::clamp(y - a.y, 0.0, a.height); };
+    const Layout lay = layout();
+    const PlotView pane = paneView(lay);
+    if (!adding) {
+        selections_.clear();
+    }
+    for (std::size_t k = 0; k < drawn_.size(); ++k) {
+        if (drawn_[k].kind != LineKind::Points) {
+            continue;
+        }
+        const int index = drawn_[k].line;
+        const PlotView view = viewOf(uprightView(pane), windowOf(static_cast<int>(k)));
+        const PointTree* tree = source().drawPoints(index, view.xLog, view.yLog);
+        const AxisMapping xMap = mappingOver(view.xMin, view.xMax, view.xLog, 10.0);
+        const AxisMapping yMap = mappingOver(view.yMin, view.yMax, view.yLog, 10.0);
+        if (tree == nullptr || tree->empty() || !xMap.usable || !yMap.usable) {
+            continue;
+        }
+        Point p(paneX(from.x()), paneY(from.y()));
+        Point q(paneX(to.x()), paneY(to.y()));
+        if (pane.transposed) {
+            p = uprightPoint(p, pane);
+            q = uprightPoint(q, pane);
+        }
+        const auto alongX = [&](double x) {
+            return xMap.low + x / view.width * (xMap.high - xMap.low);
+        };
+        const auto upY = [&](double y) {
+            return yMap.low + (1.0 - y / view.height) * (yMap.high - yMap.low);
+        };
+        Chosen& chosen = selections_[index];
+        chosen.bits.resize(static_cast<std::size_t>((tree->size() + 63) / 64), 0);
+        (void)pointsInside(*tree, alongX(p.x()), alongX(q.x()), upY(p.y()), upY(q.y()),
+                           chosen.bits);
+        chosen.count = bitsIn(chosen.bits);
+        chosen.stale = true;
+        if (chosen.count == 0) {
+            selections_.erase(index);
+        }
+    }
+    ++selectionVersion_;
+}
+
 Scene Figure::compose(const SceneRequest& request)
 {
     const Layout lay = layout();
@@ -1055,6 +1605,29 @@ Scene Figure::compose(const SceneRequest& request)
     for (int k = 0; k < count; ++k) {
         const int index = drawn_[static_cast<std::size_t>(k)].line;
         const int series = source().series(index);
+        if (drawn_[static_cast<std::size_t>(k)].kind == LineKind::Points) {
+            // A scatter has no stroke to fold: its points, as dots or as an
+            // image, and nothing in the vectors the lines' crosshair reads.
+            const LineWindow window = windowOf(k);
+            projected.emplace_back();
+            axes.emplace_back();
+            windows.push_back(window);
+            DrawnLine dots;
+            drawScatter(k, upright, pane, window, lay, request, dots);
+            LegendEntry entry;
+            entry.line = index;
+            entry.kind = LineKind::Points;
+            entry.name = source().name(index);
+            entry.colour = seriesColor(settings_.colours, series, k, count, settings_.paper,
+                                       settings_.dark, lineSettings(index).colour);
+            if (drawn_[static_cast<std::size_t>(k)].values.finite) {
+                // Drawn by its values: the middle of the map stands for them.
+                entry.colour = rampColor(colourStops(settings_), 0.5);
+            }
+            scene.lines.push_back(std::move(dots));
+            scene.legend.push_back(std::move(entry));
+            continue;
+        }
         PlotLine line = source().drawLine(index);
         const Rgba colour = seriesColor(settings_.colours, series, k, count, settings_.paper,
                                         settings_.dark, lineSettings(index).colour);
@@ -1221,7 +1794,8 @@ Scene Figure::compose(const SceneRequest& request)
             }
         }
         scene.lines.push_back(std::move(drawnLine));
-        scene.legend.push_back(LegendEntry{index, source().name(index), colour, {}, {}, {}});
+        scene.legend.push_back(
+            LegendEntry{index, LineKind::Line, source().name(index), colour, {}, {}, {}});
     }
 
     // --- what is painted, as marks -----------------------------------------------
@@ -1510,6 +2084,58 @@ Scene Figure::compose(const SceneRequest& request)
         }
     }
 
+    // --- the colour axis --------------------------------------------------------------
+    // A bar right of the pane, low values at its foot, numbered as an axis is
+    // numbered and named turned to read down it. The ramp is a box between each
+    // two stops, filled from one to the next, which is the ramp exactly: a
+    // ramp mixes in a straight line between its stops.
+    if (lay.colourBar) {
+        const PaneRect bar{a.x + a.width + s.gapM, a.y, s.legendSwatch, a.height};
+        const std::vector<Rgba> stops = colourStops(settings_);
+        const auto spans = static_cast<double>(std::max<std::size_t>(stops.size(), 2) - 1);
+        for (std::size_t i = 0; i + 1 < stops.size(); ++i) {
+            const double from = static_cast<double>(i) / spans;
+            const double to = static_cast<double>(i + 1) / spans;
+            const double barTop = a.y + (1.0 - to) * a.height;
+            const double barBottom = a.y + (1.0 - from) * a.height;
+            Mark band = boxed(PaneRect{bar.x, barTop, bar.width, barBottom - barTop}, stops[i + 1],
+                              clear, 0.0, Mark::Layer::Frame);
+            band.fillTo = stops[i];
+            scene.over.push_back(band);
+        }
+        if (stops.size() == 1) {
+            scene.over.push_back(boxed(bar, stops.front(), clear, 0.0, Mark::Layer::Frame));
+        }
+        scene.over.push_back(boxed(bar, clear, axisColour, hairline, Mark::Layer::Frame));
+        const double numbers = bar.x + bar.width + s.s3 + s.gapS;
+        for (std::size_t i = 0; i < lay.colourTicks.values.size(); ++i) {
+            const double f = fractionOn(lay.colourTicks.values[i], lay.colourLow, lay.colourHigh,
+                                        settings_.colourLog, settings_.colourLogBase);
+            if (f < -1e-9 || f > 1.0 + 1e-9) {
+                continue;
+            }
+            const double at = a.y + jsRound((1.0 - f) * a.height);
+            scene.over.push_back(filled(bar.x + bar.width, at, s.s3, hairline, axisColour));
+            addText(lay.colourTicks.texts[i], Point(numbers, at), TextItem::Align::Start,
+                    TextItem::Align::Middle, TextRole::Tick, chrome.ink);
+        }
+        if (!settings_.colourLabel.empty()) {
+            addName(settings_.colourLabel,
+                    Point(numbers + std::ceil(lay.colourWidest) + s.gapS +
+                              std::ceil(lay.nameHeight) / 2.0,
+                          a.y + a.height / 2.0),
+                    TextItem::Align::Middle, a.height, 90.0, chrome.ink);
+        }
+        SceneAxis colourAxis;
+        colourAxis.window = {lay.colourLow, lay.colourHigh};
+        colourAxis.logarithmic = settings_.colourLog;
+        colourAxis.base = settings_.colourLogBase;
+        colourAxis.ticks = lay.colourTicks;
+        colourAxis.label = settings_.colourLabel;
+        colourAxis.box = bar;
+        scene.colourAxis = std::move(colourAxis);
+    }
+
     // --- the reading under the pointer -----------------------------------------
     // Which line, which sample, and where it was drawn in the pane: taken from
     // the pointer on the pane, or named outright for a picture nobody is
@@ -1527,6 +2153,8 @@ Scene Figure::compose(const SceneRequest& request)
         double y = 0.0;
         double px = 0.0;
         double py = 0.0;
+        long long element = -1;
+        double value = std::numeric_limits<double>::quiet_NaN();
     };
     std::optional<Taken> taken;
     if (!request.picture && settings_.cursor && pointer_.has_value() && !banding_ &&
@@ -1538,6 +2166,33 @@ Scene Figure::compose(const SceneRequest& request)
             // One line at a time, each with its own x axis -- a line may carry
             // a time of its own -- and the nearest of all of them taken.
             for (std::size_t k = 0; k < projected.size(); ++k) {
+                if (drawn_[k].kind == LineKind::Points) {
+                    // The point nearest the pointer of those on screen, or the
+                    // one drawn on top where a dot covers it.
+                    const PointTree* tree = nullptr;
+                    const std::optional<PointPick> pick =
+                        pickAt(static_cast<int>(k), pane, px, py, kInfinity, &tree);
+                    if (!pick.has_value()) {
+                        continue;
+                    }
+                    const double distance = pick->distance * pick->distance;
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        const std::uint32_t slot = pick->slot;
+                        const Point at =
+                            placeOn(static_cast<int>(k), pane, tree->x[slot], tree->y[slot]);
+                        taken = Taken{static_cast<int>(k),
+                                      tree->x[slot],
+                                      tree->y[slot],
+                                      at.x(),
+                                      at.y(),
+                                      tree->element[slot],
+                                      tree->rgba.empty() && !tree->values.empty()
+                                          ? tree->values[slot]
+                                          : std::numeric_limits<double>::quiet_NaN()};
+                    }
+                    continue;
+                }
                 const std::optional<NearestSample> found =
                     nearestSample(std::span<const PlotLine>(&projected[k], 1),
                                   std::span<const PlotAxis>(&axes[k], 1), pane, px, py);
@@ -1554,7 +2209,8 @@ Scene Figure::compose(const SceneRequest& request)
                     (found->px - px) * (found->px - px) + (found->py - py) * (found->py - py);
                 if (distance < bestDistance) {
                     bestDistance = distance;
-                    taken = Taken{static_cast<int>(k), found->x, found->y, found->px, found->py};
+                    taken = Taken{static_cast<int>(k), found->x,  found->y,
+                                  found->px,           found->py, found->element};
                 }
             }
         }
@@ -1588,6 +2244,17 @@ Scene Figure::compose(const SceneRequest& request)
         reading.at = Point(a.x + taken->px, a.y + taken->py);
         reading.xText = readingText(taken->x);
         reading.yText = readingText(taken->y);
+        reading.element = taken->element;
+        if (std::isfinite(taken->value)) {
+            // Written as the colour bar writes its numbers, to the decimals its
+            // span asks for.
+            reading.value = taken->value;
+            double low = 0.0;
+            double high = 1.0;
+            reading.valueText = colourWindow(low, high)
+                                    ? axisLabel(taken->value, low, high, settings_.colourLog)
+                                    : readingText(taken->value);
+        }
         // Clipped to the pane, which answers every way the sample can be off
         // it at once: the rule through an x on screen stays, and the rule and
         // the ring at a y above the pane go, because what they mark is not
@@ -1651,10 +2318,22 @@ Scene Figure::compose(const SceneRequest& request)
             entry.to = Point(left + s.legendSwatch, middle);
             entry.textAt = Point(left + s.legendSwatch + s.gapS, middle);
             // A stroke of line rather than a block of colour, because what it
-            // stands for is a stroke.
-            scene.over.push_back(
-                boxed(PaneRect{left, middle - s.accentWidth / 2.0, s.legendSwatch, s.accentWidth},
-                      entry.colour, clear, 0.0, Mark::Layer::Frame, s.radius));
+            // stands for is a stroke -- and for a scatter a dot, for the same
+            // reason, as wide as a marker and its ring.
+            if (entry.kind == LineKind::Points) {
+                Mark dot;
+                dot.kind = Mark::Kind::Circle;
+                dot.layer = Mark::Layer::Frame;
+                dot.from = Point(left + s.legendSwatch / 2.0, middle);
+                dot.radius = (s.markerSize + s.accentWidth) / 2.0;
+                dot.fill = entry.colour;
+                scene.over.push_back(dot);
+            }
+            else {
+                scene.over.push_back(boxed(
+                    PaneRect{left, middle - s.accentWidth / 2.0, s.legendSwatch, s.accentWidth},
+                    entry.colour, clear, 0.0, Mark::Layer::Frame, s.radius));
+            }
             TextItem name;
             name.text = name.base = elided(entry.name, room, TextRole::Legend, true);
             name.at = entry.textAt;
@@ -1684,7 +2363,9 @@ Scene Figure::compose(const SceneRequest& request)
     // on, and in their face.
     if (scene.reading.valid && settings_.readout) {
         TextItem said;
-        said.text = said.base = "x " + scene.reading.xText + "   y " + scene.reading.yText;
+        said.text = said.base =
+            "x " + scene.reading.xText + "   y " + scene.reading.yText +
+            (scene.reading.valueText.empty() ? std::string() : "   c " + scene.reading.valueText);
         said.role = TextRole::Tick;
         said.colour = chrome.text;
         const double width = std::ceil(measure_.width(said.text, TextRole::Tick)) + s.gapXS * 2.0;
@@ -2076,6 +2757,12 @@ std::string Figure::yNumber(double value)
 
 int Figure::lineAt(double px, double py, double reach)
 {
+    const std::optional<Picked> picked = pointAt(px, py, reach);
+    return picked.has_value() ? picked->line : -1;
+}
+
+std::optional<Picked> Figure::pointAt(double px, double py, double reach, bool pointsOnly)
+{
     refresh();
     const Layout lay = layout();
     camera_.area = lay.area;
@@ -2083,10 +2770,35 @@ int Figure::lineAt(double px, double py, double reach)
     source().setPaneColumns(
         columnsOf((settings_.flipped ? lay.area.height : lay.area.width) * pixelRatio_));
     source().setView(camera_.viewMinX(), camera_.viewMaxX(), settings_.xLog);
-    int best = -1;
+    const double x = px - lay.area.x;
+    const double y = py - lay.area.y;
+    // A dot that covers the pointer is what is under it, the last drawn of any
+    // -- later lines are drawn over earlier ones; failing that, whatever is
+    // nearest, a later line winning a tie as it is drawn over.
+    std::optional<Picked> best;
     double bestDistance = reach * reach;
+    bool covered = false;
     for (std::size_t k = 0; k < drawn_.size(); ++k) {
         const int index = drawn_[k].line;
+        if (drawn_[k].kind == LineKind::Points) {
+            const PointTree* tree = nullptr;
+            const std::optional<PointPick> pick =
+                pickAt(static_cast<int>(k), pane, x, y, reach, &tree);
+            if (!pick.has_value()) {
+                continue;
+            }
+            const double distance = pick->distance * pick->distance;
+            if (pick->covers || (!covered && distance <= bestDistance)) {
+                covered = covered || pick->covers;
+                bestDistance = distance;
+                best = Picked{index, tree->element[pick->slot], tree->x[pick->slot],
+                              tree->y[pick->slot]};
+            }
+            continue;
+        }
+        if (pointsOnly || covered) {
+            continue;
+        }
         PlotLine line = source().drawLine(index);
         const LineWindow window = windowOf(static_cast<int>(k));
         if (window.own) {
@@ -2096,17 +2808,16 @@ int Figure::lineAt(double px, double py, double reach)
             line.ownYLog = window.logarithmic;
         }
         const PlotAxis axis = source().drawAxis(index);
-        const std::optional<NearestSample> found =
-            nearestSample(std::span<const PlotLine>(&line, 1), std::span<const PlotAxis>(&axis, 1),
-                          pane, px - lay.area.x, py - lay.area.y);
+        const std::optional<NearestSample> found = nearestSample(
+            std::span<const PlotLine>(&line, 1), std::span<const PlotAxis>(&axis, 1), pane, x, y);
         if (!found.has_value()) {
             continue;
         }
-        const double dx = found->px - (px - lay.area.x);
-        const double dy = found->py - (py - lay.area.y);
+        const double dx = found->px - x;
+        const double dy = found->py - y;
         if (dx * dx + dy * dy <= bestDistance) {
             bestDistance = dx * dx + dy * dy;
-            best = index;
+            best = Picked{index, found->element, found->x, found->y};
         }
     }
     return best;
@@ -2207,10 +2918,21 @@ void Figure::press(double px, double py, Button button, Modifiers modifiers)
     pointer_ = Point(px, py);
     moved_ = false;
     banding_ = false;
+    selecting_ = false;
+    adding_ = false;
     controlClick_ = false;
     dragLine_ = -1;
+    // What a double click puts back is what its own first click changed, and
+    // nothing older.
+    beforeClick_.reset();
     if (button == Button::Right) {
         drag_ = Drag::Band;
+        // With Shift, the band is a selection of what it holds rather than a
+        // window to zoom to -- while there is a scatter to select from.
+        selecting_ = modifiers.shift && settings_.pointGestures &&
+                     std::any_of(drawn_.begin(), drawn_.end(),
+                                 [](const Drawn& line) { return line.kind == LineKind::Points; });
+        adding_ = selecting_ && modifiers.control;
         return;
     }
     if (settings_.lineGestures &&
@@ -2248,9 +2970,21 @@ void Figure::move(double px, double py, Modifiers)
     last_ = at;
 }
 
-void Figure::release(double px, double py, Button button, Modifiers)
+void Figure::release(double px, double py, Button button, Modifiers modifiers)
 {
     last_ = Point(px, py);
+    if (drag_ == Drag::Band && button == Button::Right && selecting_) {
+        drag_ = Drag::None;
+        const bool drawn = banding_;
+        banding_ = false;
+        selecting_ = false;
+        if (drawn) {
+            refresh();
+            camera_.area = layout().area;
+            selectBand(pressed_, last_, adding_);
+        }
+        return;
+    }
     if (drag_ == Drag::Band && button == Button::Right) {
         drag_ = Drag::None;
         banding_ = false;
@@ -2275,6 +3009,15 @@ void Figure::release(double px, double py, Button button, Modifiers)
         }
         return;
     }
+    if (drag_ == Drag::Pan && !moved_ && button == Button::Left && settings_.pointGestures) {
+        // A click: the point under it, or with Shift that point added or taken
+        // out -- and a click on nothing clears what is selected.
+        drag_ = Drag::None;
+        banding_ = false;
+        refresh();
+        selectClick(px, py, modifiers.shift);
+        return;
+    }
     drag_ = Drag::None;
     banding_ = false;
 }
@@ -2284,6 +3027,13 @@ void Figure::doubleClick(double, double, Button button)
     if (button == Button::Left) {
         drag_ = Drag::None;
         banding_ = false;
+        // Its first click was a click and selected what it fell on; a double
+        // click is a reset of the view, and leaves the selection as it was.
+        if (beforeClick_.has_value()) {
+            selections_ = std::move(*beforeClick_);
+            beforeClick_.reset();
+            ++selectionVersion_;
+        }
         resetView();
     }
 }
@@ -2347,6 +3097,16 @@ std::string Figure::state() const
         .set("paneMessage", Value::of(settings_.paneMessage))
         .set("lineGestures", Value::of(settings_.lineGestures))
         .set("drawing", Value::of(std::string(drawingName(settings_.drawing))))
+        .set("pointDrawing", Value::of(std::string(pointDrawingName(settings_.pointDrawing))))
+        .set("pointGestures", Value::of(settings_.pointGestures))
+        .set("colourMap", Value::of(settings_.colourMap))
+        .set("colourReversed", Value::of(settings_.colourReversed))
+        .set("colourLog", Value::of(settings_.colourLog))
+        .set("colourLogBase", Value::of(settings_.colourLogBase))
+        .set("colourLow", Value::of(settings_.colourLow))
+        .set("colourHigh", Value::of(settings_.colourHigh))
+        .set("colourLabel", Value::of(settings_.colourLabel))
+        .set("colourBar", Value::of(settings_.colourBar))
         .set("title", Value::of(settings_.title))
         .set("xLabel", Value::of(settings_.xLabel))
         .set("yLabel", Value::of(settings_.yLabel))
@@ -2388,6 +3148,17 @@ bool Figure::restore(const std::string& text)
     next.paneMessage = root.boolOr("paneMessage", next.paneMessage);
     next.lineGestures = root.boolOr("lineGestures", next.lineGestures);
     (void)drawingOf(root.textOr("drawing", drawingName(next.drawing)), next.drawing);
+    (void)pointDrawingOf(root.textOr("pointDrawing", pointDrawingName(next.pointDrawing)),
+                         next.pointDrawing);
+    next.pointGestures = root.boolOr("pointGestures", next.pointGestures);
+    next.colourMap = root.textOr("colourMap", next.colourMap);
+    next.colourReversed = root.boolOr("colourReversed", next.colourReversed);
+    next.colourLog = root.boolOr("colourLog", next.colourLog);
+    next.colourLogBase = root.numberOr("colourLogBase", next.colourLogBase);
+    next.colourLow = root.numberOr("colourLow", next.colourLow);
+    next.colourHigh = root.numberOr("colourHigh", next.colourHigh);
+    next.colourLabel = root.textOr("colourLabel", next.colourLabel);
+    next.colourBar = root.boolOr("colourBar", next.colourBar);
     next.title = root.textOr("title", next.title);
     next.xLabel = root.textOr("xLabel", next.xLabel);
     next.yLabel = root.textOr("yLabel", next.yLabel);

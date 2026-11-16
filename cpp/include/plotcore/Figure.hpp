@@ -32,6 +32,17 @@
 // - **A line may carry a time of its own** (Plot::setLineTime), against the
 //   one x axis every line shares.
 //
+// A scatter is a line of another kind -- points given by an x and a y each,
+// drawn as dots -- and everything above holds for it as it holds for a line:
+// it is moved, scaled, stacked, coloured, named and hidden as one, and it may
+// share the pane with lines. Three things are a scatter's own. Its points may
+// each be coloured, by a value through the colour axis -- a third axis, drawn
+// as a bar right of the pane -- or by a colour of their own. They may be
+// selected, by a click or a band, and a selection is drawn over the rest. And
+// a scatter of millions is drawn as an image of the pane, from the points its
+// tree says are on top (Scatter.hpp), rather than as a dot a point for the
+// host to paint.
+//
 // A line on an axis of its own, or stacked, is numbered beside the pane in
 // its colour, as the viewer draws a separate axis -- and, as there, only while
 // a second line is drawn. A line that is only moved or scaled is not: it is a
@@ -45,9 +56,12 @@
 #include "plotcore/Plot.hpp"
 #include "plotcore/Ticks.hpp"
 
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -192,6 +206,21 @@ enum class LineDrawing
 /// The one so named, into `out`; false for no such name.
 [[nodiscard]] bool drawingOf(const std::string& name, LineDrawing& out);
 
+/// How a scatter's points reach the host.
+enum class PointDrawing
+{
+    /// A dot a point drawn, for the host to paint: DrawnLine::markers.
+    Markers,
+    /// An image of the pane with every dot in it: DrawnLine::image.
+    Image,
+    /// Markers while a scatter's share of kMaxMarkers holds what it draws, and
+    /// an image past that.
+    Adaptive,
+};
+
+[[nodiscard]] const char* pointDrawingName(PointDrawing drawing);
+[[nodiscard]] bool pointDrawingOf(const std::string& name, PointDrawing& out);
+
 /// Everything a reader chooses about the plot as a whole -- PlotSurface's
 /// drawing settings.
 struct FigureSettings
@@ -241,6 +270,28 @@ struct FigureSettings
     bool stacked = false;
     /// How a line is drawn.
     LineDrawing drawing = LineDrawing::Stroke;
+
+    // --- scatters -------------------------------------------------------------
+    /// How a scatter's points reach the host.
+    PointDrawing pointDrawing = PointDrawing::Adaptive;
+    /// Whether a click selects the point under it and a band with Shift
+    /// selects what it holds. A host that selects in a way of its own turns it
+    /// off and calls setSelection.
+    bool pointGestures = true;
+    /// The colour axis: what a scatter's values are coloured through. A ramp,
+    /// the whole of it, low values at its start unless reversed.
+    std::string colourMap = "viridis";
+    bool colourReversed = false;
+    bool colourLog = false;
+    double colourLogBase = 10.0;
+    /// The window of values the map runs over; one with no span -- the
+    /// default, both nought -- is the extent of every drawn scatter's values.
+    double colourLow = 0.0;
+    double colourHigh = 0.0;
+    std::string colourLabel;
+    /// Whether the colour axis is drawn, as a bar right of the pane, while a
+    /// drawn scatter is coloured by its values.
+    bool colourBar = true;
 };
 
 /// What a reader chooses about one line.
@@ -347,6 +398,10 @@ struct Mark
     Point to;
     /// The inside of a box or a circle. Not painted where it is clear.
     Rgba fill = Rgba::of(0.0, 0.0, 0.0, 0.0);
+    /// A box filled from `fill` at its top to this at its bottom, in a straight
+    /// line between them -- the colour bar's ramp, a box between two stops;
+    /// clear for a box of one fill.
+    Rgba fillTo = Rgba::of(0.0, 0.0, 0.0, 0.0);
     /// A segment, and the edge of a box or a circle. Not painted at a width
     /// of 0. A box's edge lies inside the box, as a QML Rectangle's border
     /// does, so a box is exactly as big as it says; a circle's is centred on
@@ -360,10 +415,25 @@ struct Mark
     TextItem text;
 };
 
+/// A picture of part of the pane, in its device pixels.
+struct PaneImage
+{
+    /// Device pixels across and down.
+    int width = 0;
+    int height = 0;
+    /// Where it is painted, in pane pixels: `width` and `height` device pixels
+    /// over this, its corners on device pixels.
+    PaneRect at;
+    /// Premultiplied red, green, blue and alpha, a byte each, the top row first.
+    std::vector<std::uint8_t> rgba;
+};
+
 /// One line, as it is drawn.
 struct DrawnLine
 {
     int line = -1;
+    /// A line, or a scatter, which has markers or an image and nothing else.
+    LineKind kind = LineKind::Line;
     Rgba colour;
     double width = 1.0;
     /// The strokes as polylines, for a host that strokes them itself.
@@ -386,9 +456,19 @@ struct DrawnLine
     /// ...and the same corners in the data's own units, for the host `values`
     /// is for.
     std::vector<Point> barValues;
-    /// Where a marker goes, when markers are on and the line is its samples.
+    /// Where a marker goes, when markers are on and the line is its samples --
+    /// and a scatter's points, as dots, when they are drawn as markers.
     std::vector<Point> markers;
     double markerRadius = 2.0;
+    /// A scatter's: each marker's colour, when they are not all `colour`, in
+    /// the order they are painted.
+    std::vector<Rgba> markerColours;
+    /// ...which point each is, by its element...
+    std::vector<long long> markerElements;
+    /// ...and where, in the data's own units, for the host `values` is for.
+    std::vector<Point> markerValues;
+    /// A scatter drawn as an image of the pane, in place of markers.
+    std::optional<PaneImage> image;
     /// The runs again in the data's own units, point for point: x as the x
     /// axis reads it and y as `y` reads it. For a host whose axes are its own
     /// -- matplotlib's -- and which is handed values to draw rather than
@@ -408,6 +488,8 @@ struct DrawnLine
 struct LegendEntry
 {
     int line = -1;
+    /// A scatter's swatch is a dot: what it stands for is a dot.
+    LineKind kind = LineKind::Line;
     std::string name;
     Rgba colour;
     Point from;
@@ -439,6 +521,13 @@ struct Reading
     /// The two numbers, written as the axes write theirs.
     std::string xText;
     std::string yText;
+    /// Which element of its line it is, or -1 where the drawing does not say:
+    /// a scatter's point, a line's sample.
+    long long element = -1;
+    /// What the point is coloured by, written as the colour bar writes it; NaN
+    /// and empty for anything not coloured by a value.
+    double value = std::numeric_limits<double>::quiet_NaN();
+    std::string valueText;
 };
 
 /// One axis as it was numbered and ruled, in its own values.
@@ -511,6 +600,8 @@ struct Scene
     SceneAxis xAxis;
     SceneAxis yAxis;
     std::vector<SceneAxis> sideAxes;
+    /// The colour axis, while its bar is drawn: `box` is the bar.
+    std::optional<SceneAxis> colourAxis;
 
     /// The texts painted over the lines, in order: what a test reads the
     /// numbers off.
@@ -531,6 +622,9 @@ struct SceneOptions
     /// Whether this host paints DrawnLine::bars. One that does not is handed
     /// the stroke, whatever FigureSettings::drawing says.
     bool bars = true;
+    /// Whether this host paints DrawnLine::image. One that does not is handed
+    /// markers, every one, whatever FigureSettings::pointDrawing says.
+    bool images = true;
 };
 
 /// A sample to draw the crosshair on, named rather than pointed at: the line,
@@ -572,6 +666,17 @@ struct SceneRequest
     /// The crosshair on this sample, placed by the picture's own axes
     /// (PlotFrame.givenReading).
     std::optional<PinnedSample> reading;
+};
+
+/// A point or a sample under the pointer, named.
+struct Picked
+{
+    int line = -1;
+    /// Its element: a scatter's point, a line's sample, or -1 where the
+    /// drawing does not say.
+    long long element = -1;
+    double x = 0.0;
+    double y = 0.0;
 };
 
 class Figure
@@ -660,6 +765,23 @@ public:
 
     /// The line drawn nearest (`px`, `py`), within `reach` pixels, or -1.
     [[nodiscard]] int lineAt(double px, double py, double reach = 12.0);
+    /// What is under (`px`, `py`): the point of a scatter whose dot covers it,
+    /// the last drawn of any -- or else the point or sample nearest it, within
+    /// `reach` pixels. `pointsOnly` asks of the scatters alone.
+    [[nodiscard]] std::optional<Picked> pointAt(double px, double py, double reach = 12.0,
+                                                bool pointsOnly = false);
+
+    // --- a scatter's selection ------------------------------------------------
+    /// The points of `line` selected, by element, ascending.
+    [[nodiscard]] std::vector<long long> selection(int line) const;
+    [[nodiscard]] long long selectionCount(int line) const;
+    /// Select these points of `line`, and no others of it.
+    void setSelection(int line, std::span<const long long> elements);
+    /// Nothing selected anywhere.
+    void clearSelection();
+    /// Counts every change of any selection, by a gesture or by a call: what a
+    /// host compares to know whether to ask again.
+    [[nodiscard]] std::uint64_t selectionVersion() const { return selectionVersion_; }
 
     // --- a view, written down ------------------------------------------------
     /// The settings, every line's settings and the window, as JSON.
@@ -685,6 +807,15 @@ private:
     {
         ColumnGrid grid;
         std::vector<unsigned char> filled;
+    };
+    /// A scatter's selection: a bit an element, and what it is as the tree
+    /// last drawn sees it.
+    struct Chosen
+    {
+        std::vector<std::uint64_t> bits;
+        long long count = 0;
+        PointSelection onTree;
+        bool stale = true;
     };
 
     struct Layout;
@@ -726,6 +857,33 @@ private:
     /// `text` broken into lines no wider than `width` in `role`'s face.
     [[nodiscard]] std::vector<std::string> wrapped(const std::string& text, double width,
                                                    TextRole role) const;
+    /// A scatter's points drawn for a scene, as markers or as an image.
+    void drawScatter(int position, const PlotView& upright, const PlotView& pane,
+                     const LineWindow& window, const Layout& layout, const SceneRequest& request,
+                     DrawnLine& out);
+    /// The view a line drawn at `position` is drawn in, upright: the pane's,
+    /// with the line's own y where it has one.
+    [[nodiscard]] PlotView viewOf(const PlotView& upright, const LineWindow& window) const;
+    /// The point of the scatter drawn at `position` under (`px`, `py`) on the
+    /// pane, in pane pixels from its corner, within `reach`: its slot, its
+    /// distance, and whether its dot covers the pointer.
+    [[nodiscard]] std::optional<PointPick> pickAt(int position, const PlotView& pane, double px,
+                                                  double py, double reach,
+                                                  const PointTree** tree = nullptr);
+    /// Where the point (`x`, `y`) of the line drawn at `position` is drawn, in
+    /// pane pixels from its corner.
+    [[nodiscard]] Point placeOn(int position, const PlotView& pane, double x, double y) const;
+    /// The selection of `line` as `tree` sees it, worked out again when either
+    /// has changed; null when nothing of it is selected.
+    [[nodiscard]] const PointSelection* selectionOf(int line, const PointTree& tree);
+    /// What the colour axis runs between, on which scale, and whether any drawn
+    /// scatter is coloured through it.
+    [[nodiscard]] bool colourWindow(double& low, double& high) const;
+    /// Select what the band between two pane points holds.
+    void selectBand(Point from, Point to, bool adding);
+    /// Select the point under a click, or toggle it; or clear, on nothing.
+    void selectClick(double px, double py, bool toggle);
+    [[nodiscard]] double dotRadius(int series) const;
     void scaleLine(int line, double py, double factor);
     void shiftLine(int line, double dy);
     void ensureLine(int line);
@@ -739,6 +897,9 @@ private:
         LineExtent extent;
         Span x;
         double xPositive = 0.0;
+        LineKind kind = LineKind::Line;
+        /// A scatter's values, which the colour axis runs over.
+        LineExtent values;
     };
     std::vector<Drawn> drawn_;
     Camera camera_;
@@ -748,6 +909,13 @@ private:
     /// filledColumns. A line that is gone leaves an answer that is only ever
     /// a lean, for a line that takes its number, one notch of a zoom long.
     std::map<int, ColumnMemory> columnMemory_;
+    /// What is selected of each scatter, by the line's number, as lineSettings.
+    std::map<int, Chosen> selections_;
+    std::uint64_t selectionVersion_ = 0;
+    /// The selections as they were before the last click changed them, which a
+    /// double click puts back: its first click was not a selection.
+    std::optional<std::map<int, Chosen>> beforeClick_;
+    PointScratch pointScratch_;
     FigureStyle style_;
     TextMeasure measure_;
     bool approximate_ = true;
@@ -770,6 +938,10 @@ private:
     bool moved_ = false;
     /// Whether a right press has gone far enough to be a band.
     bool banding_ = false;
+    /// Whether the band selects rather than zooms, and adds to what is
+    /// selected rather than replacing it.
+    bool selecting_ = false;
+    bool adding_ = false;
     bool controlClick_ = false;
     std::optional<Point> pointer_;
 };

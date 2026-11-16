@@ -815,7 +815,8 @@ void drawnPoints(const PointTree& tree, const PointSelection* selection, const P
 }
 
 std::optional<PointPick> pickPoint(const PointTree& tree, const PointSelection* selection, double x,
-                                   double y, double perX, double perY, double radius, double reach)
+                                   double y, double perX, double perY, double radius, double reach,
+                                   const PointFrame* within)
 {
     if (tree.empty() || !std::isfinite(x) || !std::isfinite(y) || !(perX > 0.0) || !(perY > 0.0)) {
         return std::nullopt;
@@ -848,6 +849,25 @@ std::optional<PointPick> pickPoint(const PointTree& tree, const PointSelection* 
         return squared(pointPosition(tree.x[slot], tree.xLog) - x,
                        pointPosition(tree.y[slot], tree.yLog) - y);
     };
+    // Whether a node is wholly outside the window, wholly inside it, and
+    // whether a point is in it at all.
+    const auto outside = [&](const PointNode& node) {
+        return within != nullptr && (node.xHigh < within->xLow || node.xLow > within->xHigh ||
+                                     node.yHigh < within->yLow || node.yLow > within->yHigh);
+    };
+    const auto wholly = [&](const PointNode& node) {
+        return within == nullptr || (node.xLow >= within->xLow && node.xHigh <= within->xHigh &&
+                                     node.yLow >= within->yLow && node.yHigh <= within->yHigh);
+    };
+    const auto placed = [&](std::uint32_t slot) {
+        if (within == nullptr) {
+            return true;
+        }
+        const double px = pointPosition(tree.x[slot], tree.xLog);
+        const double py = pointPosition(tree.y[slot], tree.yLog);
+        return px >= within->xLow && px <= within->xHigh && py >= within->yLow &&
+               py <= within->yHigh;
+    };
 
     // The last dot that covers the pointer. A node wholly inside the dot's
     // reach answers with its last point; it is the last of everything under it.
@@ -863,10 +883,10 @@ std::optional<PointPick> pickPoint(const PointTree& tree, const PointSelection* 
         const std::uint32_t index = stack.back();
         stack.pop_back();
         const PointNode& node = tree.nodes[index];
-        if (nearest(node) > covered) {
+        if (nearest(node) > covered || outside(node)) {
             continue;
         }
-        if (farthest(node) <= covered) {
+        if (farthest(node) <= covered && wholly(node)) {
             offer(node.last);
             if (selected != nullptr) {
                 offer(selected->last[index]);
@@ -875,7 +895,7 @@ std::optional<PointPick> pickPoint(const PointTree& tree, const PointSelection* 
         }
         if (node.children() == 0) {
             for (std::uint32_t s = node.first; s < node.first + node.count; ++s) {
-                if (distanceTo(s) <= covered) {
+                if (distanceTo(s) <= covered && placed(s)) {
                     offer(s);
                 }
             }
@@ -898,11 +918,14 @@ std::optional<PointPick> pickPoint(const PointTree& tree, const PointSelection* 
         const std::uint32_t index = stack.back();
         stack.pop_back();
         const PointNode& node = tree.nodes[index];
-        if (nearest(node) > best) {
+        if (nearest(node) > best || outside(node)) {
             continue;
         }
         if (node.children() == 0) {
             for (std::uint32_t s = node.first; s < node.first + node.count; ++s) {
+                if (!placed(s)) {
+                    continue;
+                }
                 const double d = distanceTo(s);
                 if (d < best || (d == best && (found == kNoSlot || keyOf(s) > keyOf(found)))) {
                     best = d;

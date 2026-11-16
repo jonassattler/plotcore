@@ -56,6 +56,31 @@ long long before(const std::vector<double>& time, long long count, bool ascendin
     return low;
 }
 
+/// The finite extent of `values`, and the smallest of them above zero.
+LineExtent extentOf(const std::vector<double>& values)
+{
+    LineExtent found;
+    double low = std::numeric_limits<double>::infinity();
+    double high = -low;
+    double positive = 0.0;
+    for (const double v : values) {
+        if (!std::isfinite(v)) {
+            continue;
+        }
+        low = std::min(low, v);
+        high = std::max(high, v);
+        if (v > 0.0 && (positive == 0.0 || v < positive)) {
+            positive = v;
+        }
+    }
+    found.finite = low <= high;
+    found.minimum = found.finite ? low : 0.0;
+    found.maximum = found.finite ? high : 0.0;
+    found.positive = positive > 0.0;
+    found.positiveMinimum = positive;
+    return found;
+}
+
 } // namespace
 
 struct Plot::Line
@@ -63,6 +88,7 @@ struct Plot::Line
     std::string name;
     long long length = 0;
     bool finished = false;
+    LineKind kind = LineKind::Line;
     std::unique_ptr<PyramidBuilder> builder;
     LinePyramid pyramid;
     LineReader reader;
@@ -108,6 +134,18 @@ struct Plot::Line
     mutable std::vector<double> barLows;
     mutable std::vector<double> barHighs;
     mutable std::vector<unsigned char> barKinds;
+
+    // A scatter's points: the tree, which is the copy, and is ordered again
+    // for other scales when it is asked for them; the points still arriving;
+    // and what they span, worked out once when they are finished -- nothing
+    // the plot's x or a time base does changes where a point is.
+    mutable PointTree points;
+    std::vector<double> arrivingX;
+    std::vector<double> arrivingY;
+    LineExtent pointY;
+    Span pointX{0.0, 0.0};
+    double pointXPositive = 0.0;
+    LineExtent values;
 
     void forget() const
     {
@@ -157,9 +195,41 @@ long long Plot::budgetDoubles() const
     return bytes / static_cast<long long>(sizeof(double));
 }
 
+int Plot::lineKindCount() const
+{
+    int count = 0;
+    for (const std::unique_ptr<Line>& line : lines_) {
+        count += line->kind == LineKind::Line ? 1 : 0;
+    }
+    return count;
+}
+
+long long Plot::pointDoubles() const
+{
+    long long held = 0;
+    for (const std::unique_ptr<Line>& line : lines_) {
+        if (line->kind == LineKind::Points) {
+            held += (line->points.bytes() + static_cast<long long>(sizeof(double)) - 1) /
+                    static_cast<long long>(sizeof(double));
+        }
+    }
+    return held;
+}
+
+long long Plot::lineBudget() const
+{
+    // A scatter is held whole and cannot give anything back, so the lines
+    // share what the scatters leave -- and never less than a sixteenth of the
+    // budget between them, or one large scatter would hold every line beside
+    // it at its coarsest.
+    const long long budget = budgetDoubles();
+    const long long points = pointDoubles();
+    return points > 0 ? std::max(budget - points, budget / 16) : budget;
+}
+
 long long Plot::share() const
 {
-    return budgetDoubles() / std::max(lineCount(), 1);
+    return lineBudget() / std::max(lineKindCount(), 1);
 }
 
 long long Plot::heldDoubles() const
@@ -168,7 +238,7 @@ long long Plot::heldDoubles() const
     for (const std::unique_ptr<Line>& line : lines_) {
         held += static_cast<long long>(line->pyramid.doubles() + line->time.size());
     }
-    return held;
+    return held + pointDoubles();
 }
 
 void Plot::fitAll()
@@ -179,7 +249,7 @@ void Plot::fitAll()
     // anyway, so the picture is the same either way.
     const long long each = share();
     for (const std::unique_ptr<Line>& line : lines_) {
-        if (!line->finished || line->pyramid.empty()) {
+        if (!line->finished || line->pyramid.empty() || line->kind != LineKind::Line) {
             continue;
         }
         const long long was = line->pyramid.baseBucket();
@@ -194,7 +264,7 @@ int Plot::addLine(const double* values, long long count, std::string name)
 {
     auto line = std::make_unique<Line>();
     line->name = std::move(name);
-    const long long each = budgetDoubles() / (lineCount() + 1);
+    const long long each = lineBudget() / (lineKindCount() + 1);
     if (values != nullptr && count > 0) {
         line->pyramid = pyramidOf(values, count, baseBucketFor(count, each));
         line->length = line->pyramid.length;
@@ -210,7 +280,7 @@ int Plot::beginLine(long long count, std::string name)
     auto line = std::make_unique<Line>();
     line->name = std::move(name);
     const long long length = std::max<long long>(count, 0);
-    const long long each = budgetDoubles() / (lineCount() + 1);
+    const long long each = lineBudget() / (lineKindCount() + 1);
     line->builder = std::make_unique<PyramidBuilder>(length, baseBucketFor(length, each));
     line->length = length;
     lines_.push_back(std::move(line));
@@ -228,6 +298,23 @@ void Plot::appendToLine(int line, const double* values, long long count)
 void Plot::finishLine(int line)
 {
     Line& held = at(line);
+    if (held.kind == LineKind::Points) {
+        if (held.finished) {
+            return;
+        }
+        held.points = pointTreeOf(held.arrivingX.data(), held.arrivingY.data(), nullptr, nullptr,
+                                  static_cast<long long>(held.arrivingX.size()), false, false);
+        held.arrivingX = {};
+        held.arrivingY = {};
+        held.length = held.points.size();
+        held.finished = true;
+        held.pointY = extentOf(held.points.y);
+        const LineExtent xs = extentOf(held.points.x);
+        held.pointX = xs.finite ? Span{xs.minimum, xs.maximum} : Span{0.0, 0.0};
+        held.pointXPositive = xs.positive ? xs.positiveMinimum : 0.0;
+        fitAll();
+        return;
+    }
     if (held.builder == nullptr) {
         return;
     }
@@ -242,8 +329,117 @@ void Plot::finishLine(int line)
 void Plot::setLineReader(int line, LineReader reader)
 {
     Line& held = at(line);
+    if (held.kind == LineKind::Points) {
+        throw std::logic_error("plotcore::Plot: a scatter is held whole and reads nothing");
+    }
     held.reader = std::move(reader);
     held.forget();
+}
+
+int Plot::addPoints(const double* x, const double* y, long long count, std::string name)
+{
+    if (count > kMaxScatterPoints) {
+        throw std::length_error("plotcore::Plot: a scatter holds at most 2^31 - 2 points");
+    }
+    const int line = beginPoints(count, std::move(name));
+    appendPoints(line, x, y, count);
+    finishLine(line);
+    return line;
+}
+
+int Plot::beginPoints(long long count, std::string name)
+{
+    if (count > kMaxScatterPoints) {
+        throw std::length_error("plotcore::Plot: a scatter holds at most 2^31 - 2 points");
+    }
+    auto line = std::make_unique<Line>();
+    line->name = std::move(name);
+    line->kind = LineKind::Points;
+    line->length = std::max<long long>(count, 0);
+    line->arrivingX.reserve(static_cast<std::size_t>(line->length));
+    line->arrivingY.reserve(static_cast<std::size_t>(line->length));
+    lines_.push_back(std::move(line));
+    return lineCount() - 1;
+}
+
+void Plot::appendPoints(int line, const double* x, const double* y, long long count)
+{
+    Line& held = at(line);
+    if (held.kind != LineKind::Points || held.finished) {
+        throw std::logic_error("plotcore::Plot: points go to a scatter still arriving");
+    }
+    if (count <= 0) {
+        return;
+    }
+    if (x == nullptr || y == nullptr) {
+        throw std::invalid_argument("plotcore::Plot: points need an x and a y each");
+    }
+    if (static_cast<long long>(held.arrivingX.size()) + count > kMaxScatterPoints) {
+        throw std::length_error("plotcore::Plot: a scatter holds at most 2^31 - 2 points");
+    }
+    held.arrivingX.insert(held.arrivingX.end(), x, x + count);
+    held.arrivingY.insert(held.arrivingY.end(), y, y + count);
+}
+
+void Plot::setPointValues(int line, const double* values, long long count)
+{
+    Line& held = at(line);
+    if (held.kind != LineKind::Points || !held.finished) {
+        throw std::logic_error("plotcore::Plot: values go to a finished scatter");
+    }
+    if (values == nullptr || count <= 0) {
+        setTreeValues(held.points, {});
+        held.values = {};
+        return;
+    }
+    if (count != held.points.size()) {
+        throw std::invalid_argument("plotcore::Plot: a value a point");
+    }
+    const std::span<const double> given(values, static_cast<std::size_t>(count));
+    setTreeValues(held.points, given);
+    held.values = extentOf(held.points.values);
+}
+
+void Plot::setPointColours(int line, const std::uint8_t* rgba, long long count)
+{
+    Line& held = at(line);
+    if (held.kind != LineKind::Points || !held.finished) {
+        throw std::logic_error("plotcore::Plot: colours go to a finished scatter");
+    }
+    if (rgba == nullptr || count <= 0) {
+        setTreeColours(held.points, {});
+        return;
+    }
+    if (count != held.points.size()) {
+        throw std::invalid_argument("plotcore::Plot: a colour a point");
+    }
+    setTreeColours(held.points,
+                   std::span<const std::uint8_t>(rgba, 4 * static_cast<std::size_t>(count)));
+}
+
+LineKind Plot::kind(int line) const
+{
+    return at(line).kind;
+}
+
+LineExtent Plot::valueExtent(int line) const
+{
+    // Points that carry colours of their own are not coloured by their values,
+    // and run no colour axis over them.
+    const Line& held = at(line);
+    return held.kind == LineKind::Points && !held.points.values.empty() && held.points.rgba.empty()
+               ? held.values
+               : LineExtent{};
+}
+
+const PointTree* Plot::drawPoints(int line, bool xLog, bool yLog) const
+{
+    const Line& held = at(line);
+    if (held.kind != LineKind::Points || !held.finished) {
+        return nullptr;
+    }
+    rebuildPointTree(held.points, xLog, yLog);
+    return &held.points;
 }
 
 void Plot::removeLine(int line)
@@ -301,6 +497,9 @@ void Plot::setTime(const double* values, long long count)
 void Plot::setLineTime(int line, const double* values, long long count)
 {
     Line& held = at(line);
+    if (held.kind == LineKind::Points) {
+        throw std::logic_error("plotcore::Plot: a scatter's x is its own");
+    }
     held.time.assign(values, values + std::max<long long>(values == nullptr ? 0 : count, 0));
     orderOf(held.time, held.timeSorted, held.timeAscending);
     held.forget();
@@ -359,6 +558,9 @@ void Plot::setView(double xLow, double xHigh, bool xLog)
 LineExtent Plot::extent(int line) const
 {
     const Line& held = at(line);
+    if (held.kind == LineKind::Points) {
+        return held.finished ? held.pointY : LineExtent{};
+    }
     LineExtent found;
     if (!held.finished || held.pyramid.empty()) {
         return found;
@@ -379,6 +581,9 @@ LineExtent Plot::extent(int line) const
 Span Plot::xExtent(int line) const
 {
     const Line& held = at(line);
+    if (held.kind == LineKind::Points) {
+        return held.pointX;
+    }
     const long long count = held.length;
     if (const std::vector<double>* time = timeOf(held)) {
         if (held.timeSpan.has_value()) {
@@ -407,6 +612,9 @@ Span Plot::xExtent(int line) const
 double Plot::xPositiveMinimum(int line) const
 {
     const Line& held = at(line);
+    if (held.kind == LineKind::Points) {
+        return held.pointXPositive;
+    }
     if (const std::vector<double>* time = timeOf(held)) {
         if (held.timePositive.has_value()) {
             return *held.timePositive;
@@ -601,7 +809,7 @@ PlotLine Plot::drawLine(int line) const
 {
     const Line& held = at(line);
     PlotLine drawn;
-    if (!held.finished || held.pyramid.empty()) {
+    if (!held.finished || held.pyramid.empty() || held.kind != LineKind::Line) {
         return drawn;
     }
     auto& line_ = const_cast<Line&>(held);
@@ -645,7 +853,7 @@ PlotLine Plot::drawLine(int line) const
 DrawnColumns Plot::drawColumns(int line, const ColumnGrid& grid) const
 {
     const Line& held = at(line);
-    if (!held.finished || held.pyramid.empty() || grid.count <= 0) {
+    if (!held.finished || held.pyramid.empty() || grid.count <= 0 || held.kind != LineKind::Line) {
         return {};
     }
     const std::vector<double>* time = timeOf(held);

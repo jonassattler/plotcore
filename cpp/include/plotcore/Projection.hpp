@@ -624,6 +624,10 @@ struct NearestSample
     double y = 0.0;
     double px = 0.0;
     double py = 0.0;
+    /// The element of the line it is, where the drawing says: the position an
+    /// envelope's value names, or the sample a line drawn sample for sample
+    /// has there. -1 on a logarithmic fold, whose points are placed by x.
+    long long element = -1;
 };
 
 /// The drawn sample nearest (`px`, `py`) on `pane`, which carries its width and

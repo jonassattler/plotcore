@@ -35,6 +35,7 @@
 #include "plotcore/Projection.hpp"
 #include "plotcore/Pyramid.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -66,8 +67,26 @@ public:
     int beginLine(long long count, std::string name = {});
     void appendToLine(int line, const double* values, long long count);
     void finishLine(int line);
-    /// Where a closer look finer than the line's base reads from.
+    /// Where a closer look finer than the line's base reads from. A scatter
+    /// has none: it is held whole.
     void setLineReader(int line, LineReader reader);
+
+    // --- points --------------------------------------------------------------
+    /// Copy `count` points in, an x and a y each, as a new line of points; its
+    /// index. Lines and scatters are numbered together.
+    int addPoints(const double* x, const double* y, long long count, std::string name = {});
+    /// Points that arrive in pieces, as a line may: `count` of them, appended
+    /// in order, and finished with finishLine. Not drawn until they are.
+    int beginPoints(long long count, std::string name = {});
+    void appendPoints(int line, const double* x, const double* y, long long count);
+    /// What each point is coloured by, a value a point in the order they were
+    /// handed over; none clears them.
+    void setPointValues(int line, const double* values, long long count);
+    /// Each point's own colour, four bytes a point -- red, green, blue and
+    /// alpha, not premultiplied -- in the order they were handed over; none
+    /// clears them. Beats the values.
+    void setPointColours(int line, const std::uint8_t* rgba, long long count);
+    [[nodiscard]] LineKind kind(int line) const override;
     void removeLine(int line);
     void clear();
 
@@ -87,7 +106,8 @@ public:
     /// A time base every line without its own is drawn against; empty for
     /// none.
     void setTime(const double* values, long long count);
-    /// A line's own time base, which beats the shared one; empty for none.
+    /// A line's own time base, which beats the shared one; empty for none. A
+    /// scatter's x is its own, and it refuses one.
     void setLineTime(int line, const double* values, long long count);
     [[nodiscard]] bool hasTime(int line) const;
 
@@ -136,6 +156,11 @@ public:
     [[nodiscard]] DrawnColumns drawColumns(int line, const ColumnGrid& grid) const override;
     /// How many columns have been folded, for the tests to hold that to.
     [[nodiscard]] long long columnsFolded() const { return columnsFolded_; }
+    /// What a scatter's points are coloured by.
+    [[nodiscard]] LineExtent valueExtent(int line) const override;
+    /// A scatter's points, ordered for the scales asked -- again, when they
+    /// were last ordered for others.
+    [[nodiscard]] const PointTree* drawPoints(int line, bool xLog, bool yLog) const override;
 
 private:
     struct Line;
@@ -143,6 +168,13 @@ private:
     [[nodiscard]] Line& at(int line);
     [[nodiscard]] const Line& at(int line) const;
     [[nodiscard]] long long share() const;
+    /// Lines that are not scatters: what the budget's share is divided by.
+    [[nodiscard]] int lineKindCount() const;
+    /// Doubles the scatters hold, which the lines' share is taken after.
+    [[nodiscard]] long long pointDoubles() const;
+    /// Doubles the lines may hold between them: the budget, less what the
+    /// scatters hold.
+    [[nodiscard]] long long lineBudget() const;
     void fitAll();
     [[nodiscard]] const std::vector<double>* timeOf(const Line& line) const;
     [[nodiscard]] bool positionsOf(const Line& line, double xLow, double xHigh, double& low,

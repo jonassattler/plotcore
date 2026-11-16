@@ -687,11 +687,25 @@ std::optional<NearestSample> nearestSample(std::span<const PlotLine> lines,
     double bestY = 0.0;
     double bestPx = 0.0;
     double bestPy = 0.0;
+    long long bestElement = -1;
 
     // Per line, because a line on an axis of its own is drawn through that
     // axis: snapping it through the common one would put the crosshair's dot
     // somewhere the stroke is not.
     AxisMapping yMap;
+    const PlotLine* current = nullptr;
+    // Which element of its line drawn value `at` is, where the drawing says.
+    const auto elementOf = [&](long long at) -> long long {
+        if (current->positions != nullptr) {
+            return std::llround(current->positions[at]);
+        }
+        if (current->xs != nullptr || current->summarised) {
+            return -1;
+        }
+        const double position =
+            current->positionStart + static_cast<double>(at) * current->positionStep;
+        return position == std::floor(position) ? static_cast<long long>(position) : -1;
+    };
     const auto consider = [&](int index, long long at, double x, double value) {
         // A sample the axes cannot place is not a sample the crosshair may snap
         // to: it was not drawn, and a readout of it would name a point that is
@@ -709,8 +723,8 @@ std::optional<NearestSample> nearestSample(std::span<const PlotLine> lines,
             bestY = value;
             bestPx = sx;
             bestPy = sy;
+            bestElement = elementOf(at);
         }
-        (void)at;
         return true;
     };
 
@@ -723,6 +737,7 @@ std::optional<NearestSample> nearestSample(std::span<const PlotLine> lines,
             continue;
         }
         yMap = yMappingOf(lineView(line, pane));
+        current = &line;
 
         if (axis.explicitX() || line.xs != nullptr ||
             !(std::abs(line.positionStep * axis.step) > 0.0)) {
@@ -813,7 +828,7 @@ std::optional<NearestSample> nearestSample(std::span<const PlotLine> lines,
         bestPx = drawn.x();
         bestPy = drawn.y();
     }
-    return NearestSample{bestLine, bestX, bestY, bestPx, bestPy};
+    return NearestSample{bestLine, bestX, bestY, bestPx, bestPy, bestElement};
 }
 
 void strokeRun(const Point* points, int count, double width, std::vector<Point>& out)

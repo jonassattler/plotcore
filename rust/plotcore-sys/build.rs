@@ -19,6 +19,7 @@ const SOURCES: &[&str] = &[
     "cpp/src/Plot.cpp",
     "cpp/src/Projection.cpp",
     "cpp/src/Pyramid.cpp",
+    "cpp/src/Scatter.cpp",
     "cpp/src/Ticks.cpp",
     "c/plotcore.cpp",
 ];

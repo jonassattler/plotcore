@@ -3230,3 +3230,790 @@ TEST_CASE("a picture is decided for its own columns and leaves the pane's as the
 
     REQUIRE(adaptive.figure.scene().lines[0].bars == before);
 }
+
+// --- points ---------------------------------------------------------------------
+
+namespace {
+
+/// A cloud the same on every machine: about a bell in each coordinate, the sum
+/// of four draws, from `x0` to `x0 + 1` and `y0` to `y0 + 1`.
+struct Cloud
+{
+    std::vector<double> x;
+    std::vector<double> y;
+};
+
+Cloud cloud(std::size_t count, unsigned seed, double x0 = 0.0, double y0 = 0.0)
+{
+    Cloud c;
+    unsigned state = seed;
+    const auto draw = [&] {
+        state = state * 1103515245u + 12345u;
+        return static_cast<double>((state >> 16) & 0x7fff) / 32767.0;
+    };
+    for (std::size_t i = 0; i < count; ++i) {
+        c.x.push_back(x0 + (draw() + draw() + draw() + draw()) / 4.0);
+        c.y.push_back(y0 + (draw() + draw() + draw() + draw()) / 4.0);
+    }
+    return c;
+}
+
+int addCloud(Figure& figure, const Cloud& c, const std::string& name = "cloud")
+{
+    return figure.plot().addPoints(c.x.data(), c.y.data(), static_cast<long long>(c.x.size()),
+                                   name);
+}
+
+} // namespace
+
+TEST_CASE("points copied in are held whole and say what they span", "[points][plot]")
+{
+    Plot plot;
+    Cloud c = cloud(5000, 3, 10.0, -2.0);
+    c.x[7] = std::nan("");
+    c.y[9] = -1e9; // far below the rest, and finite: part of the extent
+    const int line = plot.addPoints(c.x.data(), c.y.data(), 5000, "cloud");
+    CHECK(plot.kind(line) == LineKind::Points);
+    CHECK(plot.length(line) == 5000);
+    CHECK(plot.ready(line));
+    CHECK(plot.name(line) == "cloud");
+    const LineExtent y = plot.extent(line);
+    REQUIRE(y.finite);
+    CHECK(y.minimum == -1e9);
+    CHECK(y.maximum == *std::max_element(c.y.begin(), c.y.end()));
+    const Span x = plot.xExtent(line);
+    double low = 1e300;
+    double high = -1e300;
+    for (const double v : c.x) {
+        if (std::isfinite(v)) {
+            low = std::min(low, v);
+            high = std::max(high, v);
+        }
+    }
+    CHECK(x.low == low);
+    CHECK(x.high == high);
+    CHECK(plot.xPositiveMinimum(line) == low);
+    // Not a line: nothing to fold, and a tree of every point to draw.
+    CHECK(plot.drawLine(line).count == 0);
+    const PointTree* tree = plot.drawPoints(line, false, false);
+    REQUIRE(tree != nullptr);
+    CHECK(tree->size() == 5000);
+    CHECK(tree->drawable == 4999); // the NaN
+}
+
+TEST_CASE("points streamed in pieces are the points copied in whole", "[points][plot]")
+{
+    const Cloud c = cloud(10000, 5);
+    Plot plot;
+    const int whole = plot.addPoints(c.x.data(), c.y.data(), 10000);
+    const int pieces = plot.beginPoints(10000);
+    CHECK_FALSE(plot.ready(pieces));
+    for (long long at = 0; at < 10000; at += 777) {
+        const long long count = std::min<long long>(777, 10000 - at);
+        plot.appendPoints(pieces, c.x.data() + at, c.y.data() + at, count);
+    }
+    plot.finishLine(pieces);
+    REQUIRE(plot.ready(pieces));
+    const PointTree* a = plot.drawPoints(whole, false, false);
+    const PointTree* b = plot.drawPoints(pieces, false, false);
+    REQUIRE(a->size() == b->size());
+    CHECK(a->element == b->element);
+    CHECK(a->x == b->x);
+    CHECK(plot.extent(whole).minimum == plot.extent(pieces).minimum);
+}
+
+TEST_CASE("a scatter's x is its own, and it refuses a time base and a reader", "[points][plot]")
+{
+    const Cloud c = cloud(100, 7);
+    Plot plot;
+    const int line = plot.addPoints(c.x.data(), c.y.data(), 100);
+    const std::vector<double> time = ramp(100, 0.0, 1.0);
+    CHECK_THROWS(plot.setLineTime(line, time.data(), 100));
+    CHECK_THROWS(plot.setLineReader(line, [](long long, long long, double*) { return true; }));
+    // ...and the plot's x is not its x either.
+    const Span before = plot.xExtent(line);
+    plot.setIndexAxis(1000.0, 3.0);
+    plot.setTime(time.data(), 100);
+    CHECK(plot.xExtent(line) == before);
+}
+
+TEST_CASE("values and colours handed over are kept with each point", "[points][plot]")
+{
+    const Cloud c = cloud(3000, 11);
+    Plot plot;
+    const int line = plot.addPoints(c.x.data(), c.y.data(), 3000);
+    CHECK_FALSE(plot.valueExtent(line).finite);
+    std::vector<double> values = ramp(3000, -5.0, 0.01);
+    values[100] = std::nan("");
+    plot.setPointValues(line, values.data(), 3000);
+    const LineExtent extent = plot.valueExtent(line);
+    REQUIRE(extent.finite);
+    CHECK(extent.minimum == -5.0);
+    CHECK(extent.maximum == Approx(-5.0 + 2999 * 0.01));
+    std::vector<std::uint8_t> rgba(4 * 3000);
+    for (std::size_t i = 0; i < rgba.size(); ++i) {
+        rgba[i] = static_cast<std::uint8_t>(i % 251);
+    }
+    plot.setPointColours(line, rgba.data(), 3000);
+    CHECK_THROWS(plot.setPointValues(line, values.data(), 2999)); // a value a point
+    // Ordered again for other scales, each point keeps what it carries.
+    const PointTree* tree = plot.drawPoints(line, true, false);
+    REQUIRE(tree->xLog);
+    for (std::size_t s = 0; s < tree->x.size(); ++s) {
+        const std::uint32_t e = tree->element[s];
+        CHECK(tree->x[s] == c.x[e]);
+        if (!std::isnan(values[e])) {
+            CHECK(tree->values[s] == values[e]);
+        }
+        CHECK(tree->rgba[4 * s + 1] == rgba[4 * e + 1]);
+    }
+    plot.setPointValues(line, nullptr, 0);
+    CHECK_FALSE(plot.valueExtent(line).finite);
+}
+
+TEST_CASE("a scatter is held against the budget, and the lines share what it leaves",
+          "[points][plot]")
+{
+    Plot plot;
+    plot.setBudgetBytes(64LL << 20); // eight million doubles
+    const std::vector<double> long_ = walk(2000000);
+    const int line = plot.addLine(long_.data(), 2000000);
+    CHECK(plot.baseBucket(line) == 1);
+    // A scatter of a million points holds four or five million doubles, which
+    // leaves the line too little to be held element for element: it gives back
+    // what it must, and the two together stay inside the budget.
+    const Cloud c = cloud(1000000, 13);
+    const int points = plot.addPoints(c.x.data(), c.y.data(), 1000000);
+    CHECK(plot.length(points) == 1000000);
+    CHECK(plot.baseBucket(line) > 1);
+    CHECK(plot.heldDoubles() <= plot.budgetDoubles());
+}
+
+namespace {
+
+/// A figure of a scatter alone, its points drawn as markers so a test can read
+/// where each one is.
+Figure scatterOf(const Cloud& c, double width = 800.0, double height = 500.0)
+{
+    Figure figure;
+    (void)addCloud(figure, c);
+    figure.setSize(width, height);
+    FigureSettings settings = figure.settings();
+    settings.legend = false;
+    settings.pointDrawing = PointDrawing::Markers;
+    figure.setSettings(settings);
+    return figure;
+}
+
+/// Where a scatter drew element `e`, or nothing.
+std::optional<Point> markerOf(const DrawnLine& drawn, long long e)
+{
+    for (std::size_t i = 0; i < drawn.markerElements.size(); ++i) {
+        if (drawn.markerElements[i] == e) {
+            return drawn.markers[i];
+        }
+    }
+    return std::nullopt;
+}
+
+bool inside(const Point& p, const PaneRect& a, double slack = 0.0)
+{
+    return p.x() >= a.x - slack && p.x() <= a.x + a.width + slack && p.y() >= a.y - slack &&
+           p.y() <= a.y + a.height + slack;
+}
+
+} // namespace
+
+TEST_CASE("a scatter is drawn as dots in the pane it shares with a line", "[points][figure]")
+{
+    Figure figure = figureOf({ramp(1000, 0.0, 0.01)}); // x from 0 to 999, y to 10
+    Cloud c = cloud(2000, 17, 0.0, 4.0);
+    for (double& x : c.x) {
+        x = 200.0 + 900.0 * x; // from 200 to 1100: past the line's end
+    }
+    const int points = addCloud(figure, c);
+    FigureSettings settings = figure.settings();
+    settings.pointDrawing = PointDrawing::Markers;
+    figure.setSettings(settings);
+    const Scene scene = figure.scene();
+    REQUIRE(scene.lines.size() == 2);
+    const DrawnLine& dots = drawnOf(scene, points);
+    CHECK(dots.kind == LineKind::Points);
+    CHECK(dots.runs.empty());
+    CHECK(dots.triangles.empty());
+    REQUIRE_FALSE(dots.markers.empty());
+    CHECK(dots.markers.size() == dots.markerElements.size());
+    CHECK(dots.markerColours.empty()); // one colour, the scatter's
+    for (const Point& p : dots.markers) {
+        CHECK(inside(p, scene.area, dots.markerRadius + 1.0));
+    }
+    // One x axis over both, and one y.
+    CHECK(scene.x.low == 0.0);
+    CHECK(scene.x.high > 1000.0);
+    CHECK(scene.y.high > 5.0);
+    CHECK(scene.y.low < 0.0);
+    // Every point of a cloud this sparse has a cell of its own.
+    CHECK(dots.markers.size() > 1500);
+}
+
+TEST_CASE("a scatter keeps its colour when a line before it is hidden", "[points][figure]")
+{
+    Figure figure = figureOf({ramp(100, 0.0, 1.0), ramp(100, 1.0, 1.0)});
+    const int points = addCloud(figure, cloud(100, 19));
+    const Rgba before = drawnOf(figure.scene(), points).colour;
+    LineSettings hidden;
+    hidden.visible = false;
+    figure.setLineSettings(0, hidden);
+    const Rgba after = drawnOf(figure.scene(), points).colour;
+    CHECK(before == after);
+}
+
+TEST_CASE("a pan moves a scatter's dots and changes none of them", "[points][figure]")
+{
+    Figure figure = scatterOf(cloud(200000, 23));
+    figure.wheel(400, 250, 240, {}); // in a little, so there is somewhere to pan
+    const Scene at = figure.scene();
+    figure.press(400, 250, Button::Left, {});
+    figure.move(437, 231, {});
+    figure.release(437, 231, Button::Left, {});
+    const Scene moved = figure.scene();
+    const DrawnLine& a = at.lines.front();
+    const DrawnLine& b = moved.lines.front();
+    // Every point drawn well inside both panes before is drawn after, the drag
+    // away from where it was.
+    PaneRect inner = at.area;
+    inner.x += 60;
+    inner.y += 60;
+    inner.width -= 120;
+    inner.height -= 120;
+    long long kept = 0;
+    for (std::size_t i = 0; i < a.markers.size(); ++i) {
+        if (!inside(a.markers[i], inner)) {
+            continue;
+        }
+        const std::optional<Point> there = markerOf(b, a.markerElements[i]);
+        REQUIRE(there.has_value());
+        CHECK(there->x() - a.markers[i].x() == Approx(37.0).margin(1e-6));
+        CHECK(there->y() - a.markers[i].y() == Approx(-19.0).margin(1e-6));
+        ++kept;
+    }
+    CHECK(kept > 1000);
+}
+
+TEST_CASE("past its share of markers a scatter is an image, and a host without images gets dots",
+          "[points][figure]")
+{
+    Figure figure = scatterOf(cloud(300000, 29));
+    FigureSettings settings = figure.settings();
+    settings.pointDrawing = PointDrawing::Adaptive;
+    figure.setSettings(settings);
+    const Scene scene = figure.scene();
+    const DrawnLine& dots = scene.lines.front();
+    REQUIRE(dots.image.has_value());
+    CHECK(dots.markers.empty());
+    const PaneImage& image = *dots.image;
+    CHECK(image.rgba.size() == 4u * static_cast<std::size_t>(image.width * image.height));
+    CHECK(image.at.x >= scene.area.x);
+    CHECK(image.at.x + image.at.width <= scene.area.x + scene.area.width + 1e-9);
+    long long inked = 0;
+    for (std::size_t p = 3; p < image.rgba.size(); p += 4) {
+        inked += image.rgba[p] > 0 ? 1 : 0;
+    }
+    CHECK(inked > 1000);
+    // A host that paints no images is handed every point as a dot.
+    SceneRequest request;
+    request.geometry.images = false;
+    const Scene dotted = figure.scene(request);
+    const DrawnLine& every = dotted.lines.front();
+    CHECK_FALSE(every.image.has_value());
+    CHECK(static_cast<long long>(every.markers.size()) > maxMarkersFor(1));
+    // A small scatter beside it is still dots: each has its share.
+    const int small = addCloud(figure, cloud(500, 31, 0.3, 0.3));
+    const Scene both = figure.scene();
+    CHECK(drawnOf(both, 0).image.has_value());
+    CHECK_FALSE(drawnOf(both, small).image.has_value());
+    CHECK_FALSE(drawnOf(both, small).markers.empty());
+}
+
+TEST_CASE("the image of a scatter differs little from every point of it painted",
+          "[points][figure]")
+{
+    // The image is of the points the walk drew; the reference is every point,
+    // painted in the order handed over. Where they differ is where a cell
+    // holds two points of different colour and the walk drew the later one a
+    // cell over: the measure is the share of covered pixels whose colour is
+    // off by more than an eighth.
+    for (const bool dense : {false, true}) {
+        const Cloud c = cloud(dense ? 400000 : 40000, 37);
+        Figure figure = scatterOf(c, 640, 400);
+        figure.plot().setPointValues(0, c.x.data(), static_cast<long long>(c.x.size()));
+        FigureSettings settings = figure.settings();
+        settings.pointDrawing = PointDrawing::Image;
+        settings.colourBar = false;
+        figure.setSettings(settings);
+        const Scene scene = figure.scene();
+        REQUIRE(scene.lines.front().image.has_value());
+        const PaneImage& image = *scene.lines.front().image;
+        // Every point, by hand, where the scene placed the image.
+        const double xLow = scene.x.low;
+        const double xHigh = scene.x.high;
+        const double yLow = scene.y.low;
+        const double yHigh = scene.y.high;
+        const std::vector<Rgba> stops = *ramp("viridis");
+        const double vLow = *std::min_element(c.x.begin(), c.x.end());
+        const double vHigh = *std::max_element(c.x.begin(), c.x.end());
+        std::vector<Point> centres;
+        std::vector<Rgba> colours;
+        for (std::size_t i = 0; i < c.x.size(); ++i) {
+            const double px = scene.area.x + (c.x[i] - xLow) / (xHigh - xLow) * scene.area.width;
+            const double py =
+                scene.area.y + (1.0 - (c.y[i] - yLow) / (yHigh - yLow)) * scene.area.height;
+            centres.emplace_back(px - image.at.x, py - image.at.y);
+            colours.push_back(rampColor(stops, (c.x[i] - vLow) / (vHigh - vLow)));
+        }
+        std::vector<std::uint8_t> reference;
+        paintDiscs(centres, colours, scene.lines.front().markerRadius, image.width, image.height,
+                   reference);
+        long long covered = 0;
+        long long off = 0;
+        for (std::size_t p = 0; p + 3 < reference.size(); p += 4) {
+            if (reference[p + 3] == 0 && image.rgba[p + 3] == 0) {
+                continue;
+            }
+            ++covered;
+            int worst = 0;
+            for (int k = 0; k < 4; ++k) {
+                worst = std::max(worst, std::abs(int{reference[p + k]} - int{image.rgba[p + k]}));
+            }
+            off += worst > 32 ? 1 : 0;
+        }
+        const double share = static_cast<double>(off) / static_cast<double>(covered);
+        CAPTURE(dense, covered, off, share);
+        CHECK(covered > 10000);
+        CHECK(share < (dense ? 0.03 : 0.01));
+    }
+}
+
+TEST_CASE("values are coloured through the colour axis, whose bar is numbered right of the pane",
+          "[points][figure]")
+{
+    const Cloud c = cloud(400, 41);
+    Figure figure = scatterOf(c);
+    std::vector<double> values = ramp(400, 10.0, 1.0); // 10 .. 409
+    values[123] = std::nan("");
+    figure.plot().setPointValues(0, values.data(), 400);
+    FigureSettings settings = figure.settings();
+    settings.colourLabel = "temperature";
+    figure.setSettings(settings);
+    const Scene scene = figure.scene();
+    REQUIRE(scene.colourAxis.has_value());
+    const SceneAxis& axis = *scene.colourAxis;
+    CHECK(axis.window.low == 10.0);
+    CHECK(axis.window.high == 409.0);
+    CHECK(axis.box.x > scene.area.x + scene.area.width);
+    CHECK(axis.box.y == scene.area.y);
+    CHECK(axis.box.height == scene.area.height);
+    CHECK_FALSE(axis.ticks.values.empty());
+    // The bar's ramp: a box between each two stops, filled from one to the next.
+    const std::vector<Rgba> stops = *ramp("viridis");
+    long long ramps = 0;
+    for (const Mark& mark : scene.marks(Mark::Kind::Box)) {
+        ramps += mark.fillTo.alpha > 0.0 ? 1 : 0;
+    }
+    CHECK(ramps == static_cast<long long>(stops.size()) - 1);
+    // The name, turned to read down the side.
+    bool named = false;
+    for (const TextItem& text : scene.texts()) {
+        named = named || (text.text == "temperature" && text.turn == 90.0);
+    }
+    CHECK(named);
+    // Each point in its value's colour: the ends of the map at the ends of the
+    // values, and the faint ink for the one with none.
+    const DrawnLine& dots = scene.lines.front();
+    REQUIRE(dots.markerColours.size() == dots.markers.size());
+    const Chrome chrome = chromeFor(true, false);
+    for (std::size_t i = 0; i < dots.markers.size(); ++i) {
+        const long long e = dots.markerElements[i];
+        const Rgba expected =
+            e == 123 ? chrome.faint : rampColor(stops, (values[e] - 10.0) / (409.0 - 10.0));
+        CHECK(dots.markerColours[i].red == Approx(expected.red));
+        CHECK(dots.markerColours[i].green == Approx(expected.green));
+    }
+    // A pane with no scatter coloured by values has no bar, and the plain gutter.
+    Figure plain = scatterOf(c);
+    const Scene without = plain.scene();
+    CHECK_FALSE(without.colourAxis.has_value());
+    CHECK(without.area.width > scene.area.width);
+}
+
+TEST_CASE("values past a chosen colour window are drawn at its ends", "[points][figure]")
+{
+    const Cloud c = cloud(200, 43);
+    Figure figure = scatterOf(c);
+    const std::vector<double> values = ramp(200, 0.0, 1.0);
+    figure.plot().setPointValues(0, values.data(), 200);
+    FigureSettings settings = figure.settings();
+    settings.colourLow = 50.0;
+    settings.colourHigh = 150.0;
+    settings.colourReversed = true;
+    figure.setSettings(settings);
+    const Scene scene = figure.scene();
+    REQUIRE(scene.colourAxis.has_value());
+    CHECK(scene.colourAxis->window.low == 50.0);
+    const std::vector<Rgba> stops = *ramp("viridis");
+    const DrawnLine& dots = scene.lines.front();
+    for (std::size_t i = 0; i < dots.markers.size(); ++i) {
+        const long long e = dots.markerElements[i];
+        const double f = std::clamp((values[e] - 50.0) / 100.0, 0.0, 1.0);
+        // Reversed: the map's last stop at the window's foot.
+        const Rgba expected = rampColor(std::vector<Rgba>(stops.rbegin(), stops.rend()), f);
+        CHECK(dots.markerColours[i].blue == Approx(expected.blue));
+    }
+}
+
+TEST_CASE("a scatter's own colours beat its values, and draw no bar", "[points][figure]")
+{
+    const Cloud c = cloud(100, 47);
+    Figure figure = scatterOf(c);
+    const std::vector<double> values = ramp(100, 0.0, 1.0);
+    std::vector<std::uint8_t> rgba(400);
+    for (std::size_t i = 0; i < 100; ++i) {
+        rgba[4 * i] = static_cast<std::uint8_t>(i);
+        rgba[4 * i + 1] = 0;
+        rgba[4 * i + 2] = 255;
+        rgba[4 * i + 3] = 255;
+    }
+    figure.plot().setPointValues(0, values.data(), 100);
+    figure.plot().setPointColours(0, rgba.data(), 100);
+    const Scene scene = figure.scene();
+    CHECK_FALSE(scene.colourAxis.has_value());
+    const DrawnLine& dots = scene.lines.front();
+    REQUIRE(dots.markerColours.size() == dots.markers.size());
+    for (std::size_t i = 0; i < dots.markers.size(); ++i) {
+        CHECK(dots.markerColours[i].red == Approx(dots.markerElements[i] / 255.0));
+        CHECK(dots.markerColours[i].blue == 1.0);
+    }
+}
+
+TEST_CASE("the crosshair snaps to a scatter's point and reads its element and value",
+          "[points][figure]")
+{
+    const Cloud c = cloud(300, 53);
+    Figure figure = scatterOf(c);
+    const std::vector<double> values = ramp(300, 0.5, 0.25);
+    figure.plot().setPointValues(0, values.data(), 300);
+    const Scene before = figure.scene();
+    const DrawnLine& dots = before.lines.front();
+    const std::size_t i = dots.markers.size() / 2;
+    const Point at = dots.markers[i];
+    figure.hover(at.x() + 1.0, at.y() - 1.0);
+    const Scene scene = figure.scene();
+    REQUIRE(scene.reading.valid);
+    CHECK(scene.reading.line == 0);
+    CHECK(scene.reading.element == dots.markerElements[i]);
+    CHECK(scene.reading.x == c.x[static_cast<std::size_t>(dots.markerElements[i])]);
+    CHECK(scene.reading.value == values[static_cast<std::size_t>(dots.markerElements[i])]);
+    CHECK_FALSE(scene.reading.valueText.empty());
+    CHECK(scene.reading.at.x() == Approx(at.x()));
+    bool said = false;
+    for (const TextItem& text : scene.texts()) {
+        said = said || text.text.find("   c " + scene.reading.valueText) != std::string::npos;
+    }
+    CHECK(said);
+}
+
+TEST_CASE("a click selects the point under it, Shift adds or takes it out, nothing clears",
+          "[points][figure]")
+{
+    Figure figure = scatterOf(cloud(500, 59));
+    const Scene scene = figure.scene();
+    const DrawnLine& dots = scene.lines.front();
+    const Point a = dots.markers[10];
+    const Point b = dots.markers[200];
+    const auto click = [&](Point p, Modifiers m = {}) {
+        figure.press(p.x(), p.y(), Button::Left, m);
+        figure.release(p.x(), p.y(), Button::Left, m);
+    };
+    click(a);
+    CHECK(figure.selection(0) == std::vector<long long>{dots.markerElements[10]});
+    const std::uint64_t version = figure.selectionVersion();
+    Modifiers shift;
+    shift.shift = true;
+    click(b, shift);
+    CHECK(figure.selectionCount(0) == 2);
+    CHECK(figure.selectionVersion() > version);
+    click(a, shift);
+    CHECK(figure.selection(0) == std::vector<long long>{dots.markerElements[200]});
+    click(b); // a plain click on a selected point: that point alone
+    CHECK(figure.selectionCount(0) == 1);
+    // A click on nothing -- a corner of the pane, far from the cloud.
+    click(Point(scene.area.x + 2.0, scene.area.y + 2.0));
+    CHECK(figure.selectionCount(0) == 0);
+    // A drag is a pan, and selects nothing.
+    figure.press(a.x(), a.y(), Button::Left, {});
+    figure.move(a.x() + 30, a.y(), {});
+    figure.release(a.x() + 30, a.y(), Button::Left, {});
+    CHECK(figure.selectionCount(0) == 0);
+}
+
+TEST_CASE("a double click resets the view and keeps the selection", "[points][figure]")
+{
+    Figure figure = scatterOf(cloud(500, 61));
+    const Point a = figure.scene().lines.front().markers[5];
+    figure.press(a.x(), a.y(), Button::Left, {});
+    figure.release(a.x(), a.y(), Button::Left, {});
+    REQUIRE(figure.selectionCount(0) == 1);
+    figure.wheel(400, 250, 480, {});
+    const Scene scene = figure.scene();
+    // The double click's first click falls on nothing and clears; the double
+    // click puts back what was there.
+    const Point empty(scene.area.x + 3.0, scene.area.y + 3.0);
+    figure.press(empty.x(), empty.y(), Button::Left, {});
+    figure.release(empty.x(), empty.y(), Button::Left, {});
+    CHECK(figure.selectionCount(0) == 0);
+    figure.doubleClick(empty.x(), empty.y(), Button::Left);
+    CHECK(figure.selectionCount(0) == 1);
+    CHECK_FALSE(figure.camera().zoomed());
+}
+
+TEST_CASE("Shift and a right drag select what the band holds, and zoom nothing", "[points][figure]")
+{
+    const Cloud c = cloud(20000, 67);
+    Figure figure = scatterOf(c);
+    const Scene scene = figure.scene();
+    const PaneRect& a = scene.area;
+    Modifiers shift;
+    shift.shift = true;
+    const double x0 = a.x + a.width * 0.3;
+    const double x1 = a.x + a.width * 0.6;
+    const double y0 = a.y + a.height * 0.2;
+    const double y1 = a.y + a.height * 0.5;
+    figure.press(x0, y0, Button::Right, shift);
+    figure.move(x1, y1, shift);
+    CHECK(figure.scene().band.has_value()); // drawn as a band is drawn
+    figure.release(x1, y1, Button::Right, shift);
+    CHECK_FALSE(figure.camera().zoomed());
+    // By hand: every point inside the band, through the axes as they stood.
+    const double xa = scene.x.low + (x0 - a.x) / a.width * (scene.x.high - scene.x.low);
+    const double xb = scene.x.low + (x1 - a.x) / a.width * (scene.x.high - scene.x.low);
+    const double ya = scene.y.low + (1.0 - (y1 - a.y) / a.height) * (scene.y.high - scene.y.low);
+    const double yb = scene.y.low + (1.0 - (y0 - a.y) / a.height) * (scene.y.high - scene.y.low);
+    std::vector<long long> expected;
+    for (std::size_t i = 0; i < c.x.size(); ++i) {
+        if (c.x[i] >= xa && c.x[i] <= xb && c.y[i] >= ya && c.y[i] <= yb) {
+            expected.push_back(static_cast<long long>(i));
+        }
+    }
+    REQUIRE(expected.size() > 100);
+    const std::vector<long long> chosen = figure.selection(0);
+    // To within the points on the band's very edge, which rounding may put
+    // either side of it.
+    CHECK(std::abs(static_cast<long long>(chosen.size()) -
+                   static_cast<long long>(expected.size())) <= 4);
+    // With Control as well, a second band adds to the first.
+    Modifiers both = shift;
+    both.control = true;
+    figure.press(a.x + a.width * 0.7, a.y + a.height * 0.6, Button::Right, both);
+    figure.move(a.x + a.width * 0.9, a.y + a.height * 0.9, both);
+    figure.release(a.x + a.width * 0.9, a.y + a.height * 0.9, Button::Right, both);
+    CHECK(figure.selectionCount(0) > static_cast<long long>(chosen.size()));
+    // Without Shift a band zooms, as ever.
+    figure.press(x0, y0, Button::Right, {});
+    figure.move(x1, y1, {});
+    figure.release(x1, y1, Button::Right, {});
+    CHECK(figure.camera().zoomed());
+}
+
+TEST_CASE("unselected points go back, and the selected are drawn after them", "[points][figure]")
+{
+    Figure figure = scatterOf(cloud(1000, 71));
+    const std::vector<long long> chosen{3, 500, 999};
+    figure.setSelection(0, chosen);
+    const Scene scene = figure.scene();
+    const DrawnLine& dots = scene.lines.front();
+    REQUIRE(dots.markerColours.size() == dots.markers.size());
+    bool selectedSeen = false;
+    for (std::size_t i = 0; i < dots.markers.size(); ++i) {
+        const bool selected =
+            std::find(chosen.begin(), chosen.end(), dots.markerElements[i]) != chosen.end();
+        CHECK((selected || !selectedSeen));
+        selectedSeen = selectedSeen || selected;
+        CHECK(dots.markerColours[i].alpha == Approx(selected ? 1.0 : 0.275));
+    }
+    CHECK(selectedSeen);
+}
+
+TEST_CASE("a host may keep points from being selected by gesture", "[points][figure]")
+{
+    Figure figure = scatterOf(cloud(200, 73));
+    FigureSettings settings = figure.settings();
+    settings.pointGestures = false;
+    figure.setSettings(settings);
+    const Point a = figure.scene().lines.front().markers[0];
+    figure.press(a.x(), a.y(), Button::Left, {});
+    figure.release(a.x(), a.y(), Button::Left, {});
+    CHECK(figure.selectionCount(0) == 0);
+    const std::vector<long long> chosen{1, 2};
+    figure.setSelection(0, chosen); // and selects in its own way
+    CHECK(figure.selectionCount(0) == 2);
+}
+
+TEST_CASE("a selection is kept by its line's number and follows it", "[points][figure]")
+{
+    Figure figure = figureOf({ramp(100, 0.0, 1.0)});
+    const int points = addCloud(figure, cloud(300, 79));
+    const std::vector<long long> chosen{7, 8, 9};
+    figure.setSelection(points, chosen);
+    figure.removeLine(0);
+    CHECK(figure.selection(points - 1) == chosen);
+    CHECK(figure.selectionCount(points) == 0);
+}
+
+TEST_CASE("a scatter on an axis of its own, stacked or flipped is drawn in that window",
+          "[points][figure]")
+{
+    Figure figure = figureOf({ramp(1000, 0.0, 1.0)}); // y from 0 to 999
+    const Cloud c = cloud(500, 83, 400.0, 0.0);       // y from 0 to 1
+    const int points = addCloud(figure, c);
+    FigureSettings settings = figure.settings();
+    settings.pointDrawing = PointDrawing::Markers;
+    figure.setSettings(settings);
+    // On the common axis the cloud is a flat smear along the foot.
+    const Scene common = figure.scene();
+    const DrawnLine& flat = drawnOf(common, points);
+    double top = 1e9;
+    for (const Point& p : flat.markers) {
+        top = std::min(top, p.y());
+    }
+    CHECK(top > common.area.y + common.area.height * 0.9);
+    // On an axis of its own it fills the pane, and is numbered beside it.
+    LineSettings own;
+    own.ownAxis = true;
+    figure.setLineSettings(points, own);
+    const Scene apart = figure.scene();
+    const DrawnLine& tall = drawnOf(apart, points);
+    CHECK(tall.own);
+    CHECK(tall.numbered);
+    CHECK(tall.y.high < 2.0);
+    top = 1e9;
+    for (const Point& p : tall.markers) {
+        top = std::min(top, p.y());
+    }
+    CHECK(top < apart.area.y + apart.area.height * 0.4);
+    REQUIRE(apart.sideAxes.size() == 1);
+    CHECK(apart.sideAxes.front().line == points);
+    // Stacked, in the lower of two bands.
+    figure.setLineSettings(points, LineSettings{});
+    settings.stacked = true;
+    figure.setSettings(settings);
+    const Scene bands = figure.scene();
+    for (const Point& p : drawnOf(bands, points).markers) {
+        CHECK(p.y() > bands.area.y + bands.area.height * 0.45);
+    }
+    // Flipped: x runs up the pane.
+    settings.stacked = false;
+    settings.flipped = true;
+    figure.setSettings(settings);
+    const Scene up = figure.scene();
+    const DrawnLine& turned = drawnOf(up, points);
+    REQUIRE_FALSE(turned.markers.empty());
+    for (std::size_t i = 0; i < turned.markers.size(); ++i) {
+        const auto e = static_cast<std::size_t>(turned.markerElements[i]);
+        const double along = (c.x[e] - up.x.low) / (up.x.high - up.x.low);
+        CHECK(turned.markers[i].y() ==
+              Approx(up.area.y + (1.0 - along) * up.area.height).margin(1e-6));
+    }
+}
+
+TEST_CASE("a logarithmic axis leaves out a scatter's points at or below zero", "[points][figure]")
+{
+    Cloud c = cloud(400, 89, 1.0, 1.0);
+    c.x[0] = -3.0;
+    c.y[1] = 0.0;
+    Figure figure = scatterOf(c);
+    FigureSettings settings = figure.settings();
+    settings.xLog = true;
+    settings.yLog = true;
+    figure.setSettings(settings);
+    const Scene scene = figure.scene();
+    const DrawnLine& dots = scene.lines.front();
+    CHECK_FALSE(markerOf(dots, 0).has_value());
+    CHECK_FALSE(markerOf(dots, 1).has_value());
+    CHECK(dots.markers.size() > 300);
+    CHECK(scene.message.empty());
+}
+
+TEST_CASE("Alt and a drag move a scatter on its axis, as they move a line", "[points][figure]")
+{
+    Figure figure = figureOf({ramp(1000, 0.0, 1.0)});
+    const int points = addCloud(figure, cloud(400, 97, 300.0, 300.0));
+    FigureSettings settings = figure.settings();
+    settings.pointDrawing = PointDrawing::Markers;
+    figure.setSettings(settings);
+    const Point at = drawnOf(figure.scene(), points).markers[0];
+    CHECK(figure.lineAt(at.x(), at.y()) == points);
+    Modifiers alt;
+    alt.alt = true;
+    figure.press(at.x(), at.y(), Button::Left, alt);
+    figure.move(at.x(), at.y() + 40, alt);
+    figure.release(at.x(), at.y() + 40, Button::Left, alt);
+    CHECK(figure.lineSettings(points).shift != 0.0);
+    CHECK(figure.lineSettings(0).shift == 0.0);
+    CHECK(figure.selectionCount(points) == 0); // a drag selects nothing
+}
+
+TEST_CASE("a picture draws a scatter again at its own size", "[points][figure]")
+{
+    Figure figure = scatterOf(cloud(3000, 101));
+    const Scene pane = figure.scene();
+    SceneRequest request;
+    request.picture = true;
+    request.width = 1600;
+    request.height = 1000;
+    const Scene picture = figure.scene(request);
+    const DrawnLine& dots = picture.lines.front();
+    CHECK(picture.area.width > pane.area.width * 1.8);
+    for (const Point& p : dots.markers) {
+        CHECK(inside(p, picture.area, dots.markerRadius + 1.0));
+    }
+    CHECK(dots.markers.size() >= pane.lines.front().markers.size());
+    // ...and the pane is as it was.
+    const Scene again = figure.scene();
+    CHECK(again.area.width == pane.area.width);
+}
+
+TEST_CASE("the colour axis is written in a view and read back, and the selection is not",
+          "[points][figure]")
+{
+    Figure figure = scatterOf(cloud(100, 103));
+    FigureSettings settings = figure.settings();
+    settings.colourMap = "inferno";
+    settings.colourLog = true;
+    settings.colourLogBase = 2.0;
+    settings.colourLow = 1.0;
+    settings.colourHigh = 64.0;
+    settings.colourLabel = "count";
+    settings.colourBar = false;
+    settings.colourReversed = true;
+    settings.pointDrawing = PointDrawing::Image;
+    settings.pointGestures = false;
+    figure.setSettings(settings);
+    const std::vector<long long> chosen{1, 2, 3};
+    figure.setSelection(0, chosen);
+    const std::string state = figure.state();
+    Figure other = scatterOf(cloud(100, 103));
+    REQUIRE(other.restore(state));
+    const FigureSettings& read = other.settings();
+    CHECK(read.colourMap == "inferno");
+    CHECK(read.colourLog);
+    CHECK(read.colourLogBase == 2.0);
+    CHECK(read.colourLow == 1.0);
+    CHECK(read.colourHigh == 64.0);
+    CHECK(read.colourLabel == "count");
+    CHECK_FALSE(read.colourBar);
+    CHECK(read.colourReversed);
+    CHECK(read.pointDrawing == PointDrawing::Image);
+    CHECK_FALSE(read.pointGestures);
+    CHECK(other.selectionCount(0) == 0);
+    CHECK(state.find("\"selection") == std::string::npos);
+}

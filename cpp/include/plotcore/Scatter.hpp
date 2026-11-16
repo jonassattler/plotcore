@@ -56,6 +56,12 @@
 //   least as late as itself -- under the dot of one, at the size dots are
 //   drawn at.
 //
+// Held against every point painted, in the order handed over and coloured by
+// a value through a ramp, what the walk draws differs by more than an eighth
+// in any channel in 0.86% of the covered pixels of a 640 by 400 pane at forty
+// thousand points, and in 0.48% at four hundred thousand: where a cell holds
+// two points of different colours and the later one stood a cell over.
+//
 // What a frame costs is the nodes it visits. In a view zoomed alike on both
 // axes that is a few for every cell the points occupy, and so bounded by the
 // pane. A view zoomed on one axis far more than on the other is the worst
@@ -273,13 +279,16 @@ struct PointPick
 
 /// The point under (`x`, `y`), which are axis positions: the last point whose
 /// dot of `radius` covers it, as the one drawn on top there -- or, where no dot
-/// does, the nearest within `reach`. `perX` and `perY` are device pixels a
-/// position, which is how a distance on the pane is measured. Nothing when no
+/// does, the nearest within `reach`. `perX` and `perY` are pixels a position,
+/// which is how a distance on the pane is measured, and `radius` and `reach`
+/// are in the same pixels. `within`, when it is given, is the window a point
+/// must be in to be taken at all: the one on screen, so a crosshair asked for
+/// the nearest point anywhere is not handed one off the pane. Nothing when no
 /// point is within reach.
 [[nodiscard]] std::optional<PointPick> pickPoint(const PointTree& tree,
                                                  const PointSelection* selection, double x,
                                                  double y, double perX, double perY, double radius,
-                                                 double reach);
+                                                 double reach, const PointFrame* within = nullptr);
 
 /// Every point inside the box between `xLow` and `xHigh` and `yLow` and
 /// `yHigh`, in axis positions, as the element of each, into `out` -- a bit an
