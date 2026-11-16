@@ -14,7 +14,10 @@ it none.
 
 The frame is matplotlib's, which is this host's one decision; what answers the
 reader -- the crosshair and its reading, the band, why the pane cannot draw --
-is the scene's overlay, painted as the scene lays it out.
+is the scene's overlay, painted as the scene lays it out. A scatter is drawn
+from the points the figure kept, at their values: a collection of dots, each
+in its colour, or -- when it is dense -- the figure's own image of the pane;
+and its colour bar is matplotlib's, beside the axes, over the figure's map.
 
 `draw()` paints once, for a picture. `View` keeps a matplotlib figure live: a
 scroll, a drag and a band go through the plotcore figure's own gestures, so
@@ -30,14 +33,32 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 try:
+    from matplotlib.cm import ScalarMappable
     from matplotlib.collections import PolyCollection
+    from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
     from matplotlib.patches import Rectangle
     from matplotlib.ticker import MultipleLocator
 except ImportError as error:  # pragma: no cover
     raise ImportError("plotcore.mpl needs matplotlib: pip install plotcore[matplotlib]") from error
 
+from . import palette
 from .figure import Button, Figure, Modifiers
-from .scene import FORM_BARS, FORM_RUNS, FORM_VALUES, Align, Layer, MarkKind, Scene, TextRole
+from .scene import (
+    FORM_BARS,
+    FORM_IMAGE,
+    FORM_RUNS,
+    FORM_VALUES,
+    Align,
+    Layer,
+    LineKind,
+    MarkKind,
+    Scene,
+    TextRole,
+)
+
+# What a scene is asked for here: values to draw at, and the scatter's image,
+# which is drawn as it is rather than as dots matplotlib would draw again.
+_FORMS = FORM_RUNS | FORM_VALUES | FORM_BARS | FORM_IMAGE
 
 # How far apart the spines of axes of their own sit, in points.
 _SPINE = 48
@@ -118,7 +139,15 @@ def _paint(figure: Figure, scene: Scene, ax, extra: list) -> None:
     slot = 0
     markers = settings["markers"]
     names = {entry.line: entry.name for entry in scene.legend}
+    points = 72.0 / ax.figure.dpi
+    area = scene.area
     for line in scene.lines:
+        if line.kind == LineKind.POINTS:
+            drawn = _points(scene, line, ax, area, points, flipped)
+            if drawn is not None and line.line in names:
+                drawn.set_label(names[line.line])
+                handles.append(drawn)
+            continue
         xs, ys = _joined(line.values)
         if flipped:
             xs, ys = ys, xs
@@ -179,12 +208,66 @@ def _paint(figure: Figure, scene: Scene, ax, extra: list) -> None:
     (ax.set_ylabel if flipped else ax.set_xlabel)(x_label, color=chrome.ink[:3])
     if common:
         (ax.set_xlabel if flipped else ax.set_ylabel)(y_label, color=chrome.ink[:3])
+    if scene.colour_axis is not None:
+        _colour_bar(figure, scene, ax, extra)
     if handles and settings["legend"]:
         legend = ax.legend(handles=handles, loc=_CORNERS.get(settings["legendCorner"], "best"),
                            facecolor=chrome.ground[:3], edgecolor=chrome.axis_rule[:3],
                            labelcolor=chrome.ink[:3])
         legend.set_zorder(10)
     _overlay(figure, scene, ax)
+
+
+def _points(scene: Scene, line, ax, area, points: float, flipped: bool):
+    """A scatter onto `ax`: its image in the axes' own box, which is the pane, or
+    its dots at their values, each in its colour -- the collection, for the
+    legend, or None."""
+    if line.image is not None and area.width > 0 and area.height > 0:
+        # Premultiplied, and matplotlib wants it straight.
+        rgba = line.image.pixels.astype(np.float64) / 255.0
+        alpha = rgba[:, :, 3:4]
+        rgba[:, :, :3] = np.divide(rgba[:, :, :3], alpha, out=np.zeros_like(rgba[:, :, :3]),
+                                   where=alpha > 0)
+        r = line.image.rect
+        left = (r.x - area.x) / area.width
+        right = (r.x + r.width - area.x) / area.width
+        top = 1.0 - (r.y - area.y) / area.height
+        bottom = 1.0 - (r.y + r.height - area.y) / area.height
+        ax.imshow(np.clip(rgba, 0.0, 1.0), extent=(left, right, bottom, top),
+                  transform=ax.transAxes, interpolation="nearest", aspect="auto", zorder=2)
+        # The legend's swatch, which the image is not.
+        return ax.scatter([], [], s=(2.0 * line.marker_radius * points) ** 2,
+                          color=line.colour[:3], edgecolors="none")
+    if not len(line.markers) or not len(line.marker_values):
+        return None
+    xs, ys = line.marker_values[:, 0], line.marker_values[:, 1]
+    if flipped:
+        xs, ys = ys, xs
+    colours = line.marker_colours if len(line.marker_colours) else [line.colour]
+    return ax.scatter(xs, ys, s=(2.0 * line.marker_radius * points) ** 2, c=colours,
+                      edgecolors="none", zorder=2)
+
+
+def _colour_bar(figure: Figure, scene: Scene, ax, extra: list) -> None:
+    """The colour axis as matplotlib draws one, beside the axes: on an inset,
+    so the axes keep the box that is the figure's pane."""
+    settings = figure.settings
+    stops = palette(settings["colourMap"]) or palette("viridis")
+    if settings["colourReversed"]:
+        stops = list(reversed(stops))
+    axis = scene.colour_axis
+    norm = (LogNorm(axis.low, axis.high) if axis.log and axis.low > 0
+            else Normalize(axis.low, axis.high))
+    mappable = ScalarMappable(norm=norm, cmap=LinearSegmentedColormap.from_list(
+        "plotcore", [s[:3] for s in stops]))
+    bar = ax.inset_axes([1.02, 0.0, 0.03, 1.0])
+    extra.append(bar)
+    drawn = ax.figure.colorbar(mappable, cax=bar)
+    ink = scene.chrome.ink[:3]
+    drawn.ax.tick_params(colors=ink)
+    drawn.outline.set_edgecolor(scene.chrome.axis_rule[:3])
+    if settings["colourLabel"]:
+        drawn.set_label(settings["colourLabel"], color=ink)
 
 
 _ROLES = {
@@ -252,17 +335,20 @@ def _pixels_of(ax) -> Tuple[int, int]:
     return max(1, int(round(box.width))), max(1, int(round(box.height)))
 
 
-def draw(figure: Figure, ax=None, *, size: Optional[Tuple[int, int]] = None):
+def draw(figure: Figure, ax=None, *, size: Optional[Tuple[int, int]] = None,
+         images: bool = True):
     """Draw `figure` once onto the matplotlib axes `ax` (a new figure's when
     None) and return the axes. The lines are folded for `size` pixels, or for
-    the axes' own size."""
+    the axes' own size. With `images` off, a dense scatter is every dot it
+    draws rather than its image: vector all the way, for a PDF that will be
+    larger for it."""
     if ax is None:
         import matplotlib.pyplot as plt
 
         _, ax = plt.subplots()
     width, height = size if size is not None else _pixels_of(ax)
     figure.set_size(width, height)
-    scene = figure.scene(forms=FORM_RUNS | FORM_VALUES | FORM_BARS)
+    scene = figure.scene(forms=_FORMS if images else _FORMS & ~FORM_IMAGE)
     _paint(figure, scene, ax, [])
     return ax
 
@@ -305,7 +391,7 @@ class View:
         # The figure's pane is laid out at the axes' size, so a pixel of a
         # gesture is a pixel of the line and a band's minimum is a band's.
         self.figure.set_size(width, height)
-        self._scene = self.figure.scene(forms=FORM_RUNS | FORM_VALUES | FORM_BARS)
+        self._scene = self.figure.scene(forms=_FORMS)
         _paint(self.figure, self._scene, self.ax, self._extra)
         self.mpl.canvas.draw_idle()
 

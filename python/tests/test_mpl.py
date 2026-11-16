@@ -111,3 +111,31 @@ def test_the_live_view_is_moved_by_the_figure_s_gestures():
         fig.canvas.callbacks.process(name, MouseEvent(name, fig.canvas, x, middle[1],
                                                       button=button))
     assert figure.view[0] < zoomed[0], "a drag to the right shows what is to the left"
+
+
+def test_a_scatter_is_dots_at_its_values_or_its_image_and_a_bar_beside():
+    rng = np.random.default_rng(3)
+    x, y = rng.normal(size=600), rng.normal(size=600)
+    with plotcore.Figure() as figure:
+        figure.add_points(x, y, "cloud")
+        figure.set_point_values(0, x)
+        figure.settings["pointDrawing"] = "markers"
+        fig = MplFigure(figsize=(8, 5), dpi=100)
+        ax = fig.add_subplot(111)
+        mpl.draw(figure, ax)
+        dots = ax.collections[0]
+        offsets = dots.get_offsets()
+        assert len(offsets) > 500
+        assert np.isin(offsets[:, 0], x).all()  # each a point, at its value
+        assert len(dots.get_facecolors()) == len(offsets)
+        assert len(ax.child_axes) == 1, "the colour bar, on an inset beside the axes"
+        # Dense, it is the figure's image, drawn in the axes' box.
+        figure.settings["pointDrawing"] = "image"
+        ax2 = MplFigure(figsize=(8, 5), dpi=100).add_subplot(111)
+        mpl.draw(figure, ax2)
+        assert len(ax2.images) == 1
+        assert ax2.images[0].get_array().shape[2] == 4
+        # ...or every dot, for a picture that is vector all the way.
+        ax3 = MplFigure(figsize=(8, 5), dpi=100).add_subplot(111)
+        mpl.draw(figure, ax3, images=False)
+        assert len(ax3.images) == 0 and len(ax3.collections[0].get_offsets()) > 500

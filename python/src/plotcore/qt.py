@@ -7,7 +7,8 @@
 What plotcore::qt::PlotWidget does in C++, in Python: tell the figure the
 widget's size and how its fonts measure, hand it every wheel, press, move and
 release, and paint the Scene that comes back. Nothing here decides where a tick
-goes or what a gesture does.
+goes or what a gesture does. A scatter is its markers, each in its own colour,
+or -- when it is dense -- an image plotcore painted, which this blits.
 
     pip install plotcore[qt]
 """
@@ -23,6 +24,7 @@ try:
         QFont,
         QFontMetricsF,
         QImage,
+        QLinearGradient,
         QPainter,
         QPen,
         QPolygonF,
@@ -59,9 +61,11 @@ def _button(button) -> Optional[Button]:
 
 class PlotWidget(QWidget):
     """A QWidget over a plotcore Figure. `changed` is emitted after anything
-    the reader did moved the view, a line or the reading."""
+    the reader did moved the view, a line or the reading, and
+    `selection_changed` after a click or a band changed what is selected."""
 
     changed = pyqtSignal()
+    selection_changed = pyqtSignal()
 
     def __init__(self, figure: Optional[Figure] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -73,6 +77,7 @@ class PlotWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMinimumSize(160, 120)
         self._metrics: Dict[TextRole, QFontMetricsF] = {}
+        self._selection = self.figure.selection_version
         self.figure.set_text_measure(self._text_width, self._text_height)
 
     def sizeHint(self) -> QSize:  # noqa: N802 -- Qt's name
@@ -192,7 +197,15 @@ class PlotWidget(QWidget):
             painter.setPen(pen)
         else:
             painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(_qcolor(mark.fill) if mark.fill[3] > 0.0 else Qt.BrushStyle.NoBrush)
+        if mark.kind == MarkKind.BOX and mark.fill_to[3] > 0.0:
+            # The colour bar's ramp: from the fill at the top to fill_to at the foot.
+            ramp = QLinearGradient(QPointF(mark.x0, mark.y0), QPointF(mark.x0, mark.y1))
+            ramp.setColorAt(0.0, _qcolor(mark.fill))
+            ramp.setColorAt(1.0, _qcolor(mark.fill_to))
+            painter.setBrush(ramp)
+        else:
+            painter.setBrush(_qcolor(mark.fill) if mark.fill[3] > 0.0
+                             else Qt.BrushStyle.NoBrush)
         if mark.kind == MarkKind.SEGMENT:
             # Crisp rather than smeared over two rows.
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -248,10 +261,25 @@ class PlotWidget(QWidget):
                     painter.drawPoint(QPointF(run[0, 0], run[0, 1]))
                     continue
                 painter.drawPolyline(QPolygonF([QPointF(x, y) for x, y in run]))
+            if line.image is not None:
+                # A dense scatter, painted by plotcore into the pane's own device
+                # pixels: blitted onto them, and nothing about it decided here.
+                pixels = line.image.pixels
+                height, width = pixels.shape[:2]
+                picture = QImage(pixels.tobytes(), width, height, 4 * width,
+                                 QImage.Format.Format_RGBA8888_Premultiplied)
+                r = line.image.rect
+                painter.drawImage(QRectF(r.x, r.y, r.width, r.height), picture,
+                                  QRectF(0, 0, width, height))
             if len(line.markers):
+                # A scatter's markers each in a colour of their own, when they
+                # have one, in the order given: the later over the earlier.
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(_qcolor(line.colour))
-                for x, y in line.markers:
+                own = len(line.marker_colours) == len(line.markers)
+                for i, (x, y) in enumerate(line.markers.tolist()):
+                    if own:
+                        painter.setBrush(_qcolor(line.marker_colours[i]))
                     painter.drawEllipse(QPointF(x, y), line.marker_radius, line.marker_radius)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.restore()
@@ -299,6 +327,13 @@ class PlotWidget(QWidget):
         event.accept()
         self.update()
         self.changed.emit()
+        self._announce_selection()
+
+    def _announce_selection(self) -> None:
+        version = self.figure.selection_version
+        if version != self._selection:
+            self._selection = version
+            self.selection_changed.emit()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         button = _button(event.button())
@@ -310,6 +345,7 @@ class PlotWidget(QWidget):
         event.accept()
         self.update()
         self.changed.emit()
+        self._announce_selection()
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self.figure.leave()

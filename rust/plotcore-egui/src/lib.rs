@@ -14,6 +14,11 @@
 //! polyline egui feathers itself ([`Strokes::Feathered`]), which antialiases a
 //! hairline where a mesh cannot.
 //!
+//! A scatter is its markers, each a circle egui feathers, in its own colour --
+//! or, when it is dense, the image of the pane plotcore painted, which is
+//! uploaded into a texture kept from frame to frame ([`Pictures`]) and drawn
+//! on the pane's device pixels.
+//!
 //! One rule about where a scene is made: plotcore measures text by calling
 //! back into egui's fonts, which takes the context's lock, so the figure is
 //! never asked for a scene from inside `ui.input(...)` or any other closure
@@ -21,10 +26,36 @@
 
 use egui::epaint::{Mesh, TextShape};
 use egui::{
-    Color32, CornerRadius, Event, FontId, MouseWheelUnit, Painter, PointerButton, Pos2, Rect,
-    Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
+    Color32, ColorImage, CornerRadius, Event, FontId, MouseWheelUnit, Painter, PointerButton, Pos2,
+    Rect, Response, Sense, Shape, Stroke, StrokeKind, TextureHandle, TextureId, TextureOptions, Ui,
+    Vec2,
 };
-use plotcore::{Align, Button, Figure, Mark, MarkKind, Modifiers, Rgba, Scene, TextRole};
+use plotcore::{Align, Button, Figure, Image, Mark, MarkKind, Modifiers, Rgba, Scene, TextRole};
+
+/// The textures a scene's images are painted from, kept from frame to frame:
+/// a scatter's image is uploaded into the texture it had last frame rather than
+/// into a new one, and a texture is let go of only with this.
+#[derive(Default)]
+pub struct Pictures {
+    textures: Vec<TextureHandle>,
+}
+
+impl Pictures {
+    /// Image `slot` of a scene, uploaded.
+    fn texture(&mut self, ctx: &egui::Context, slot: usize, image: &Image) -> TextureId {
+        let pixels = ColorImage::from_rgba_premultiplied([image.width, image.height], &image.rgba);
+        // On the pane's own device pixels, so each texel is one: nothing to blend.
+        let options = TextureOptions::NEAREST;
+        if let Some(handle) = self.textures.get_mut(slot) {
+            handle.set(pixels, options);
+            return handle.id();
+        }
+        let handle = ctx.load_texture(format!("plotcore image {slot}"), pixels, options);
+        let id = handle.id();
+        self.textures.push(handle);
+        id
+    }
+}
 
 /// How a line's stroke is painted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,6 +76,8 @@ pub struct PlotView {
     inside: bool,
     measured: Option<[f32; ROLES]>,
     changed: bool,
+    pictures: Pictures,
+    selection: u64,
 }
 
 /// What a wheel notch is in egui's units, as Qt counts it: 120 eighths of a
@@ -96,7 +129,18 @@ impl PlotView {
             inside: false,
             measured: None,
             changed: false,
+            pictures: Pictures::default(),
+            selection: 0,
         }
+    }
+
+    /// Whether a click or a band changed what is selected of a scatter since
+    /// this was last asked.
+    pub fn selection_changed(&mut self) -> bool {
+        let version = self.figure.selection_version();
+        let changed = version != self.selection;
+        self.selection = version;
+        changed
     }
 
     /// The last frame painted, for the reading, the view or a test.
@@ -222,7 +266,14 @@ impl PlotView {
 
         if let Ok(scene) = self.figure.scene() {
             let fonts = TextRole::ALL.map(|role| self.font(role));
-            paint_scene(&ui.painter_at(rect), rect.min.to_vec2(), &scene, &fonts, self.strokes);
+            paint_scene(
+                &ui.painter_at(rect),
+                rect.min.to_vec2(),
+                &scene,
+                &fonts,
+                self.strokes,
+                &mut self.pictures,
+            );
             self.last = Some(scene);
         }
         response
@@ -286,7 +337,19 @@ fn paint_mark(
             let r =
                 Rect::from_two_pos(pos(offset, mark.x0, mark.y0), pos(offset, mark.x1, mark.y1));
             let corners = CornerRadius::same(mark.radius.round().clamp(0.0, 255.0) as u8);
-            if mark.fill.alpha > 0.0 {
+            if mark.fill_to.alpha > 0.0 {
+                // The colour bar's ramp: a quad from the fill at its top to
+                // fill_to at its foot, which egui blends between its vertices.
+                let (top, foot) = (fill, colour(mark.fill_to));
+                let mut ramp = Mesh::default();
+                ramp.colored_vertex(r.left_top(), top);
+                ramp.colored_vertex(r.right_top(), top);
+                ramp.colored_vertex(r.right_bottom(), foot);
+                ramp.colored_vertex(r.left_bottom(), foot);
+                ramp.add_triangle(0, 1, 2);
+                ramp.add_triangle(0, 2, 3);
+                painter.add(Shape::mesh(ramp));
+            } else if mark.fill.alpha > 0.0 {
                 painter.rect_filled(r, corners, fill);
             }
             // Filled to its bounds, and edged inside them.
@@ -322,13 +385,15 @@ fn paint_mark(
 
 /// Paint `scene` with `painter`, `offset` from its pane origin: all a host
 /// other than [`PlotView`] needs to draw a figure in egui. Every colour, width
-/// and place is the scene's.
+/// and place is the scene's; `pictures` holds the textures a scatter's image
+/// is painted from, and lives as long as the host draws.
 pub fn paint_scene(
     painter: &Painter,
     offset: Vec2,
     scene: &Scene,
     fonts: &[FontId; ROLES],
     strokes: Strokes,
+    pictures: &mut Pictures,
 ) {
     let whole =
         Rect::from_min_size(offset.to_pos2(), Vec2::new(scene.width as f32, scene.height as f32));
@@ -344,8 +409,23 @@ pub fn paint_scene(
         paint_mark(painter, &pane, offset, mark, fonts);
     }
 
+    let mut slot = 0;
     for line in &scene.lines {
         let ink = colour(line.colour);
+        if let Some(image) = &line.image {
+            // On the device pixels it was painted for: its corner is one, and
+            // the offset is put on one first, as the bars' is.
+            let scale = painter.pixels_per_point();
+            let origin = (offset * scale).round() / scale;
+            let at = Rect::from_min_size(
+                Pos2::new(image.rect.x as f32, image.rect.y as f32) + origin,
+                Vec2::new(image.rect.width as f32, image.rect.height as f32),
+            );
+            let texture = pictures.texture(painter.ctx(), slot, image);
+            slot += 1;
+            let whole = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            pane.image(texture, at, whole, Color32::WHITE);
+        }
         if !line.bars.is_empty() {
             pane.add(Shape::mesh(bars_mesh(&line.bars, offset, ink, painter.pixels_per_point())));
         }
@@ -365,8 +445,12 @@ pub fn paint_scene(
                 }
             }
         }
-        for m in &line.markers {
-            pane.circle_filled(pos(offset, m[0], m[1]), line.marker_radius as f32, ink);
+        // A scatter's markers each in a colour of their own, when they have
+        // one, in the order given: the later over the earlier.
+        let own = line.marker_colours.len() == line.markers.len();
+        for (k, m) in line.markers.iter().enumerate() {
+            let fill = if own { colour(line.marker_colours[k]) } else { ink };
+            pane.circle_filled(pos(offset, m[0], m[1]), line.marker_radius as f32, fill);
         }
     }
 
@@ -547,6 +631,51 @@ mod tests {
         assert_eq!(whole, vec![(4.0, 5.0, 1.0)]);
         let nearly: Vec<_> = device_spans(4.001, 4.999).collect();
         assert_eq!(nearly, vec![(4.0, 5.0, 1.0)], "not a sliver of a pixel at each side");
+    }
+
+    #[test]
+    fn a_dense_scatter_is_painted_as_one_texture_and_a_sparse_one_as_dots() {
+        let n = 200_000;
+        let mut state = 7u32;
+        let mut draw = || {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            f64::from((state >> 16) & 0x7fff) / 32767.0
+        };
+        let x: Vec<f64> = (0..n).map(|_| draw()).collect();
+        let y: Vec<f64> = (0..n).map(|_| draw()).collect();
+        let mut figure = Figure::new();
+        figure.add_points(&x, &y, "cloud").unwrap();
+        figure.add_points(&x[..200], &y[..200], "few").unwrap();
+        let mut view = PlotView::new(figure);
+        let ctx = egui::Context::default();
+        let output = frame(&ctx, &mut view, vec![]);
+        let scene = view.last_scene().unwrap();
+        assert!(scene.lines[0].image.is_some());
+        assert_eq!(scene.lines[1].markers.len(), 200);
+        let textured = output
+            .iter()
+            .filter(|clipped| {
+                matches!(&clipped.shape, Shape::Mesh(mesh) if mesh.texture_id != TextureId::default())
+            })
+            .count();
+        assert_eq!(textured, 1, "the dense one, as one texture");
+        let dots =
+            output.iter().filter(|clipped| matches!(&clipped.shape, Shape::Circle(_))).count();
+        assert!(dots >= 200, "the sparse one, a dot each");
+        // The texture is the one it had, next frame.
+        let again = frame(&ctx, &mut view, vec![]);
+        let ids: Vec<TextureId> = [&output, &again]
+            .iter()
+            .flat_map(|shapes| shapes.iter())
+            .filter_map(|clipped| match &clipped.shape {
+                Shape::Mesh(mesh) if mesh.texture_id != TextureId::default() => {
+                    Some(mesh.texture_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], ids[1]);
     }
 
     #[test]

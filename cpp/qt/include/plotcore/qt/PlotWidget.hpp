@@ -16,6 +16,11 @@
 // polyline as well as plotcore's mesh would and the widget gets antialiasing
 // and hairlines for nothing. A host that fills triangles (egui, a GPU) uses
 // DrawnLine::triangles instead; the runs and the triangles are one stroke.
+//
+// A scatter is its markers, each a dot in its own colour, or -- when it is
+// dense -- an image plotcore painted into the pane's device pixels, which this
+// blits. A dot an ellipse at a time is the slowest thing QPainter is asked to
+// do, and the image is what kMaxMarkers is set from.
 
 #include "plotcore/Figure.hpp"
 
@@ -24,6 +29,7 @@
 #include <QWidget>
 
 #include <array>
+#include <cstdint>
 
 class QPainter;
 
@@ -62,6 +68,8 @@ signals:
     /// Something the reader did moved the view, a line or the reading. A host
     /// with controls bound to the figure refreshes them here.
     void changed();
+    /// A click or a band changed what is selected of a scatter.
+    void selectionChanged();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -78,11 +86,13 @@ private:
     void applyMeasure();
     void drawText(QPainter& painter, const TextItem& text) const;
     void paintMark(QPainter& painter, const Mark& mark, const QRectF& area) const;
+    void announceSelection();
 
     Figure figure_;
     Scene scene_;
     std::array<QFont, 6> fonts_;
     std::array<bool, 6> fontSet_{};
+    std::uint64_t selection_ = 0;
 };
 
 } // namespace plotcore::qt

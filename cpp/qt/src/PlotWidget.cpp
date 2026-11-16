@@ -4,6 +4,7 @@
 #include "plotcore/qt/PlotWidget.hpp"
 
 #include <QFontMetricsF>
+#include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -204,7 +205,16 @@ void PlotWidget::paintMark(QPainter& painter, const Mark& mark, const QRectF& ar
     else {
         painter.setPen(Qt::NoPen);
     }
-    painter.setBrush(mark.fill.alpha > 0.0 ? QBrush(qcolor(mark.fill)) : QBrush(Qt::NoBrush));
+    if (mark.kind == Mark::Kind::Box && mark.fillTo.alpha > 0.0) {
+        // The colour bar's ramp: from the fill at the top to fillTo at the foot.
+        QLinearGradient ramp(qpoint(mark.from), QPointF(mark.from.x(), mark.to.y()));
+        ramp.setColorAt(0.0, qcolor(mark.fill));
+        ramp.setColorAt(1.0, qcolor(mark.fillTo));
+        painter.setBrush(QBrush(ramp));
+    }
+    else {
+        painter.setBrush(mark.fill.alpha > 0.0 ? QBrush(qcolor(mark.fill)) : QBrush(Qt::NoBrush));
+    }
     switch (mark.kind) {
     case Mark::Kind::Segment:
         // Crisp rather than smeared over two rows.
@@ -285,11 +295,26 @@ void PlotWidget::paintScene(QPainter& painter, const Scene& scene) const
             }
             painter.drawPolyline(polygon);
         }
+        if (line.image.has_value() && !line.image->rgba.empty()) {
+            // A dense scatter, painted by plotcore into the pane's own device
+            // pixels: blitted onto them, and nothing about it decided here.
+            const PaneImage& image = *line.image;
+            const QImage pixels(image.rgba.data(), image.width, image.height, 4 * image.width,
+                                QImage::Format_RGBA8888_Premultiplied);
+            painter.drawImage(QRectF(image.at.x, image.at.y, image.at.width, image.at.height),
+                              pixels, QRectF(0, 0, image.width, image.height));
+        }
         if (!line.markers.empty()) {
+            // A scatter's markers each in a colour of their own, when they have
+            // one, in the order given: the later over the earlier.
             painter.setPen(Qt::NoPen);
+            const bool own = line.markerColours.size() == line.markers.size();
             painter.setBrush(qcolor(line.colour));
-            for (const Point& point : line.markers) {
-                painter.drawEllipse(qpoint(point), line.markerRadius, line.markerRadius);
+            for (std::size_t i = 0; i < line.markers.size(); ++i) {
+                if (own) {
+                    painter.setBrush(qcolor(line.markerColours[i]));
+                }
+                painter.drawEllipse(qpoint(line.markers[i]), line.markerRadius, line.markerRadius);
             }
             painter.setBrush(Qt::NoBrush);
         }
@@ -349,6 +374,15 @@ void PlotWidget::mouseReleaseEvent(QMouseEvent* event)
     event->accept();
     update();
     emit changed();
+    announceSelection();
+}
+
+void PlotWidget::announceSelection()
+{
+    if (figure_.selectionVersion() != selection_) {
+        selection_ = figure_.selectionVersion();
+        emit selectionChanged();
+    }
 }
 
 void PlotWidget::mouseDoubleClickEvent(QMouseEvent* event)
@@ -363,6 +397,7 @@ void PlotWidget::mouseDoubleClickEvent(QMouseEvent* event)
     event->accept();
     update();
     emit changed();
+    announceSelection();
 }
 
 void PlotWidget::leaveEvent(QEvent* event)

@@ -120,3 +120,32 @@ def test_the_example_walks_every_feature(qapp, tmp_path):
     assert window.self_test(str(picture)) == 0
     assert picture.stat().st_size > 10_000
     window.close()
+
+
+def test_the_widget_paints_a_scatter_in_its_colours_and_selects_by_a_click(qapp):
+    rng = np.random.default_rng(5)
+    widget = PlotWidget()
+    widget.resize(640, 400)
+    widget.figure.add_points(rng.random(300), rng.random(300), "cloud")
+    widget.figure.set_point_colours(0, np.tile([255, 0, 0, 255], (300, 1)).astype(np.uint8))
+    widget.figure.settings["pointDrawing"] = "markers"
+    widget.figure.settings["legend"] = False
+    image = widget.grab().toImage()
+    reds = sum(1 for x in range(0, image.width(), 2) for y in range(0, image.height(), 2)
+               if (lambda c: c.red() > 200 and c.green() < 60)(image.pixelColor(x, y)))
+    assert reds > 50
+    # A click on a dot selects its point, and says so.
+    seen = []
+    widget.selection_changed.connect(lambda: seen.append(True))
+    px, py = widget.last_scene.lines[0].markers[0]
+    at = QPointF(px, py)
+    for kind in (QMouseEvent.Type.MouseButtonPress, QMouseEvent.Type.MouseButtonRelease):
+        QApplication.sendEvent(widget, QMouseEvent(kind, at, at, Qt.MouseButton.LeftButton,
+                                                   Qt.MouseButton.LeftButton,
+                                                   Qt.KeyboardModifier.NoModifier))
+    assert len(widget.figure.selection(0)) == 1 and seen
+    # Dense, the image plotcore painted is what is painted.
+    widget.figure.add_points(rng.random(200_000), rng.random(200_000), "dense")
+    widget.figure.settings["pointDrawing"] = "adaptive"
+    widget.grab()
+    assert widget.last_scene.lines[1].image is not None
