@@ -217,3 +217,75 @@ scene
 set_bool xLog 0
 set_text drawing stroke
 scene
+
+# --- points ---------------------------------------------------------------------
+# A scatter, on linear axes only: the tree places a point by its position, and
+# a logarithm an ulp apart on another platform could put it in another cell.
+clear
+set_text pointDrawing markers
+points cloud 3000 777 cloud
+scene
+hover 400 250
+scene
+leave
+line ramp 2 0 1 corner to corner
+scene
+point_values 0 ramp 3000 -1 0.001
+set_text colourLabel rank
+scene
+set_text colourMap inferno
+set_bool colourReversed 1
+set_number colourLow -0.5
+set_number colourHigh 0.5
+scene
+hover 380 220
+scene
+leave
+point_colours 0 4321
+scene
+click_point 0 100 none
+scene
+click_point 0 200 shift
+scene
+press 300 150 right shift
+move 500 300 shift
+release 500 300 right shift
+scene
+press 300 150 right shift|control
+move 350 400 shift|control
+release 350 400 right shift|control
+scene
+pick 400 250
+pick 20 20
+line_bool 0 ownAxis 1
+scene
+line_bool 0 ownAxis 0
+set_bool stacked 1
+scene
+set_bool stacked 0
+set_bool flipped 1
+scene
+set_bool flipped 0
+press 400 250 left alt
+move 400 290 alt
+release 400 290 left alt
+scene
+clear_selection
+set_text pointDrawing image
+scene
+size 800 500 2
+scene
+size 800 500 1
+set_text pointDrawing adaptive
+points cloud 40000 99 dense
+scene
+wheel 400 250 240 none
+scene
+press 400 250 left none
+move 427 250 none
+release 427 250 left none
+scene
+select 2 5 50 500 5000 39999
+scene
+set_bool legend 1
+scene

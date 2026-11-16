@@ -27,6 +27,10 @@
  * - **A failure is a status, not an exception.** Every call that can fail
  *   returns one, and plotcore_last_error() says why, on the calling thread.
  *
+ * A line may also be a scatter: points copied in as an x and a y each, drawn
+ * as dots. It is numbered with the lines and set by the same names, and a scene
+ * hands it over as markers or, when it is dense, as an image of the pane.
+ *
  * A figure is not thread-safe: one thread at a time, as with any widget. */
 
 #include <stddef.h>
@@ -50,7 +54,7 @@ extern "C" {
 
 /* Bumped whenever a declaration below changes meaning or layout. A binding
  * compares it with plotcore_abi_version() before it calls anything else. */
-#define PLOTCORE_ABI_VERSION 2
+#define PLOTCORE_ABI_VERSION 3
 
 typedef enum plotcore_status
 {
@@ -131,8 +135,19 @@ enum
     /* A host that paints plotcore_scene_line_bars asks for this. One that does
      * not is handed the stroke, whatever the setting `drawing` says. */
     PLOTCORE_FORM_BARS = 16,
-    PLOTCORE_FORM_ALL = 31
+    /* A host that paints plotcore_scene_line_image asks for this. One that does
+     * not is handed every point as a marker, whatever `pointDrawing` says. */
+    PLOTCORE_FORM_IMAGE = 32,
+    PLOTCORE_FORM_ALL = 63
 };
+
+/* What a line is: elements along the x the figure gives them, or a scatter's
+ * points, which each carry an x of their own. */
+typedef enum plotcore_kind
+{
+    PLOTCORE_LINE = 0,
+    PLOTCORE_POINTS = 1
+} plotcore_kind;
 
 typedef enum plotcore_appetite
 {
@@ -185,6 +200,16 @@ typedef struct plotcore_line_info
     int32_t y_log;
     int32_t own;
     int32_t numbered;
+    /* A plotcore_kind. A scatter has markers, or an image, and nothing
+     * else: `coloured` is 1 when its markers each have a colour of their own
+     * (plotcore_scene_line_marker_colours), and `image_width` and
+     * `image_height` are the device pixels of its image, zero for none, painted
+     * over `image_rect` in pane pixels. */
+    int32_t kind;
+    int32_t coloured;
+    int64_t image_width;
+    int64_t image_height;
+    plotcore_rect image_rect;
 } plotcore_line_info;
 
 /* One thing to paint, in pane pixels with y down, which a host translates into
@@ -194,7 +219,9 @@ typedef struct plotcore_line_info
  *   BOX      from its top left (x0, y0) to its bottom right (x1, y1), filled
  *            with `fill`, edged in `stroke` at `width` inside those bounds,
  *            its corners rounded to `radius`, the edge in dashes when
- *            `dashed`.
+ *            `dashed`. A `fill_to` that is not clear fills it from `fill` at
+ *            its top to `fill_to` at its bottom, in a straight line: the
+ *            colour bar's ramp, a box between two stops.
  *   CIRCLE   about (x0, y0) at `radius`, filled with `fill` and edged in
  *            `stroke` at `width`.
  *   TEXT     at (x0, y0). `base` is set in `role`'s face and `exponent` raised
@@ -230,6 +257,7 @@ typedef struct plotcore_mark
     const char* text;
     const char* base;
     const char* exponent;
+    plotcore_rgba fill_to;
 } plotcore_mark;
 
 /* What a scene is asked for (plotcore_scene_request_new).
@@ -270,9 +298,14 @@ typedef struct plotcore_legend_entry
     double text_x;
     double text_y;
     const char* name;
+    /* A plotcore_kind: a scatter's swatch is a dot. */
+    int32_t kind;
 } plotcore_legend_entry;
 
-/* The sample under the pointer. The strings live as long as the scene. */
+/* The sample under the pointer. The strings live as long as the scene.
+ * `element` is which element of its line it is, or -1 where the drawing does
+ * not say; `value` is what a scatter's point is coloured by, written as the
+ * colour bar writes it in `value_text`, or NaN and empty. */
 typedef struct plotcore_reading
 {
     int32_t valid;
@@ -283,7 +316,19 @@ typedef struct plotcore_reading
     double py;
     const char* x_text;
     const char* y_text;
+    int64_t element;
+    double value;
+    const char* value_text;
 } plotcore_reading;
+
+/* A point or a sample under the pointer (plotcore_point_at). */
+typedef struct plotcore_picked
+{
+    int32_t line;
+    int64_t element;
+    double x;
+    double y;
+} plotcore_picked;
 
 typedef struct plotcore_figure plotcore_figure;
 typedef struct plotcore_scene plotcore_scene;
@@ -358,6 +403,54 @@ PLOTCORE_API plotcore_status plotcore_get_line_name(const plotcore_figure* figur
 PLOTCORE_API int32_t plotcore_line_ready(const plotcore_figure* figure, int32_t line);
 /* 1 when a line is drawn against a time base, its own or the shared one. */
 PLOTCORE_API int32_t plotcore_line_has_time(const plotcore_figure* figure, int32_t line);
+/* A plotcore_kind, or -1 for no line. */
+PLOTCORE_API int32_t plotcore_line_kind(const plotcore_figure* figure, int32_t line);
+
+/* --- points ---------------------------------------------------------------------- */
+
+/* Copy `count` points in as a scatter, an x and a y each, named `name`
+ * (UTF-8, or null). Its index -- among the lines, which it is numbered with --
+ * is written to `line`. A point whose x or y is not finite is held and never
+ * drawn. At most 2^31 - 2 points. */
+PLOTCORE_API plotcore_status plotcore_add_points(plotcore_figure* figure, const double* x,
+                                                 const double* y, int64_t count, const char* name,
+                                                 int32_t* line);
+/* Points that arrive in pieces: `count` of them, appended in order, then
+ * finished with plotcore_finish_line. Not drawn until they are. */
+PLOTCORE_API plotcore_status plotcore_begin_points(plotcore_figure* figure, int64_t count,
+                                                   const char* name, int32_t* line);
+PLOTCORE_API plotcore_status plotcore_append_points(plotcore_figure* figure, int32_t line,
+                                                    const double* x, const double* y,
+                                                    int64_t count);
+/* What each point of a finished scatter is coloured by, through the colour
+ * axis: one value a point, in the order they were handed over; null or zero
+ * clears them. */
+PLOTCORE_API plotcore_status plotcore_set_point_values(plotcore_figure* figure, int32_t line,
+                                                       const double* values, int64_t count);
+/* Each point's own colour, four bytes a point -- red, green, blue, alpha, not
+ * premultiplied -- which beats its value; null or zero clears them. */
+PLOTCORE_API plotcore_status plotcore_set_point_colours(plotcore_figure* figure, int32_t line,
+                                                        const uint8_t* rgba, int64_t count);
+
+/* What is under (px, py): the point of a scatter whose dot covers it, the
+ * last drawn of any, or else the point or sample nearest it within `reach`
+ * pixels; `points_only` asks of the scatters alone. 1 and `out` filled when
+ * there is one, 0 when not. */
+PLOTCORE_API int32_t plotcore_point_at(plotcore_figure* figure, double px, double py, double reach,
+                                       int32_t points_only, plotcore_picked* out);
+
+/* A scatter's selection, by element. plotcore_get_selection copies up to
+ * `capacity` of them, ascending, and writes how many there are to `count`. */
+PLOTCORE_API int64_t plotcore_selection_count(const plotcore_figure* figure, int32_t line);
+PLOTCORE_API plotcore_status plotcore_get_selection(const plotcore_figure* figure, int32_t line,
+                                                    int64_t* elements, int64_t capacity,
+                                                    int64_t* count);
+PLOTCORE_API plotcore_status plotcore_set_selection(plotcore_figure* figure, int32_t line,
+                                                    const int64_t* elements, int64_t count);
+PLOTCORE_API plotcore_status plotcore_clear_selection(plotcore_figure* figure);
+/* Counts every change of any selection: what a host compares to know whether
+ * to ask again. */
+PLOTCORE_API uint64_t plotcore_selection_version(const plotcore_figure* figure);
 
 /* --- x -------------------------------------------------------------------------------- */
 
@@ -388,12 +481,16 @@ PLOTCORE_API int64_t plotcore_held_bytes(const plotcore_figure* figure);
  *   bool    xLog yLog flipped minorNumbers markers cursor readout bandReadout
  *           paneMessage lineGestures legend bundle dark paper stacked
  *           colours.reversed colours.custom
+ *           pointGestures colourReversed colourLog colourBar
  *   number  gridStepX gridStepY xLogBase yLogBase highlighted colours.from
  *           colours.to
+ *           colourLogBase colourLow colourHigh
  *   text    title xLabel yLabel grid ("none" "loose" "dense" "custom")
  *           legendCorner ("top-left" "top-right" "bottom-left" "bottom-right")
  *           drawing ("stroke" "bars" "adaptive")
  *           colours.mode (a palette, a ramp, "same" or "range")
+ *           pointDrawing ("markers" "image" "adaptive")
+ *           colourMap (a ramp) colourLabel
  *   colour  colours.single colours.rangeFrom colours.rangeTo
  *
  * One line:
@@ -416,6 +513,15 @@ PLOTCORE_API int64_t plotcore_held_bytes(const plotcore_figure* figure);
  *
  * A change of either scale or of the flip puts the view back, as the viewer's
  * does: a pan in decades and a pan in units have no reading that is both.
+ *
+ * The colour axis is what a scatter's values are coloured through: the ramp
+ * `colourMap`, over `colourLow` to `colourHigh` -- or, while those have no
+ * span, over every drawn scatter's values -- drawn as a bar right of the pane
+ * while `colourBar` is on and a drawn scatter is coloured by its values.
+ * `pointGestures` lets a click select the point under it, Shift and a click
+ * add or remove it, and Shift and a right drag select what the band holds
+ * (with Control, add it). `pointDrawing` is how a scatter reaches the host:
+ * as markers, as an image of the pane, or as markers while it is sparse.
  *
  * The three colours are the ground's until one is chosen, and follow the
  * ground while they are: setting one pins all three at what they are drawn as
@@ -569,6 +675,22 @@ PLOTCORE_API const double* plotcore_scene_line_bars(const plotcore_scene* scene,
  * PLOTCORE_FORM_VALUES as well. For a host whose axes are its own. */
 PLOTCORE_API const double* plotcore_scene_line_bar_values(const plotcore_scene* scene,
                                                           int64_t index);
+/* A scatter's markers, as plotcore_scene_line_markers has them: each one's
+ * colour as red, green, blue and alpha, not premultiplied, when `coloured`
+ * says they have their own; which point each is, by its element; and where
+ * each is in the data's own units, when the scene was asked for
+ * PLOTCORE_FORM_VALUES. Painted in this order, the later over the earlier. */
+PLOTCORE_API const double* plotcore_scene_line_marker_colours(const plotcore_scene* scene,
+                                                              int64_t index);
+PLOTCORE_API const int64_t* plotcore_scene_line_marker_elements(const plotcore_scene* scene,
+                                                                int64_t index);
+PLOTCORE_API const double* plotcore_scene_line_marker_values(const plotcore_scene* scene,
+                                                             int64_t index);
+/* A dense scatter as an image of the pane: `image_width` by `image_height`
+ * device pixels (plotcore_line_info), premultiplied red, green, blue and
+ * alpha a byte each, the top row first, to be painted over `image_rect`.
+ * Null for a line that has none. */
+PLOTCORE_API const uint8_t* plotcore_scene_line_image(const plotcore_scene* scene, int64_t index);
 
 /* What is painted under the lines, and over them, each in the order it is
  * painted: the ground first, then `under`, the lines clipped to the pane, and
@@ -590,6 +712,12 @@ PLOTCORE_API plotcore_rect plotcore_scene_legend_rect(const plotcore_scene* scen
 PLOTCORE_API plotcore_reading plotcore_scene_reading(const plotcore_scene* scene);
 /* 1 and the band while a right drag is drawing one, else 0. */
 PLOTCORE_API int32_t plotcore_scene_band(const plotcore_scene* scene, plotcore_rect* band);
+/* 1 while the colour bar is drawn, with what it runs between, whether it is
+ * logarithmic, and the bar in pane pixels; else 0. For a host that draws its
+ * own frame: plotcore_scene_over paints it. */
+PLOTCORE_API int32_t plotcore_scene_colour_axis(const plotcore_scene* scene, double* low,
+                                                double* high, int32_t* logarithmic,
+                                                plotcore_rect* bar);
 
 #ifdef __cplusplus
 }

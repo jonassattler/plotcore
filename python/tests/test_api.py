@@ -25,7 +25,7 @@ def figure_of(*lines, width=800, height=500):
 
 
 def test_the_library_is_the_one_this_package_speaks_to():
-    assert plotcore.abi_version() == 2
+    assert plotcore.abi_version() == 3
     assert plotcore.version() == "0.2.1"
     assert plotcore.palette_names() == ["okabe-ito", "tol bright", "tol muted", "spectrum", "safe"]
     assert plotcore.ramp_names()[1] == "viridis"
@@ -236,3 +236,97 @@ def test_a_scene_outlives_its_figure_and_holds_numpy():
     assert scene.rules and all(rule.layer == plotcore.Layer.GRID for rule in scene.rules)
     assert any(text.text == "0" for text in scene.texts)
     assert scene.chrome.ink[:3] == (1.0, 1.0, 1.0)
+
+
+# --- points ---------------------------------------------------------------------
+
+
+def cloud(n, seed=7):
+    """About a bell in each coordinate, from 0 to 1."""
+    rng = np.random.default_rng(seed)
+    return rng.random((n, 4)).mean(axis=1), rng.random((n, 4)).mean(axis=1)
+
+
+def scatter_of(x, y, drawing="markers"):
+    figure = Figure()
+    figure.add_points(x, y, "cloud")
+    figure.set_size(800, 500)
+    figure.settings["legend"] = False
+    figure.settings["pointDrawing"] = drawing
+    return figure
+
+
+def test_points_are_copied_in_and_drawn_as_dots_that_say_which_point_each_is():
+    x, y = cloud(2000)
+    figure = scatter_of(x, y)
+    x[:] = -1.0  # copied: the caller may reuse its arrays
+    line = figure.line(0)
+    assert line.kind == plotcore.LineKind.POINTS
+    assert line.length == 2000
+    drawn = figure.scene().lines[0]
+    assert drawn.kind == plotcore.LineKind.POINTS
+    assert drawn.runs == [] and len(drawn.triangles) == 0
+    assert len(drawn.markers) == len(drawn.marker_elements) > 1000
+    assert drawn.image is None
+    # Where each marker is in the data's own units is the point it names.
+    x2, y2 = cloud(2000)
+    elements = drawn.marker_elements
+    assert np.allclose(drawn.marker_values[:, 0], x2[elements])
+    assert np.allclose(drawn.marker_values[:, 1], y2[elements])
+    with pytest.raises(plotcore.Error):
+        figure.set_line_time(0, np.arange(2000.0))
+    with pytest.raises(ValueError):
+        figure.add_points([1.0, 2.0], [1.0])
+
+
+def test_a_dense_scatter_is_an_image_unless_the_host_paints_none():
+    x, y = cloud(200_000)
+    figure = scatter_of(x, y, drawing="adaptive")
+    drawn = figure.scene().lines[0]
+    assert drawn.image is not None and len(drawn.markers) == 0
+    pixels = drawn.image.pixels
+    assert pixels.dtype == np.uint8 and pixels.shape[2] == 4
+    assert (pixels[:, :, 3] > 0).sum() > 1000
+    every = figure.scene(forms=plotcore.FORM_ALL & ~plotcore.FORM_IMAGE).lines[0]
+    assert every.image is None and len(every.markers) > 20_000
+
+
+def test_values_colour_the_points_through_a_bar_and_colours_of_their_own_beat_them():
+    x, y = cloud(500)
+    figure = scatter_of(x, y)
+    figure.set_point_values(0, np.arange(500.0))
+    figure.settings["colourMap"] = "inferno"
+    figure.settings["colourLabel"] = "rank"
+    scene = figure.scene()
+    assert scene.colour_axis is not None
+    assert (scene.colour_axis.low, scene.colour_axis.high) == (0.0, 499.0)
+    assert scene.colour_axis.bar.x > scene.area.x + scene.area.width
+    drawn = scene.lines[0]
+    assert drawn.marker_colours.shape == (len(drawn.markers), 4)
+    assert any(m.kind == plotcore.MarkKind.BOX and m.fill_to[3] > 0 for m in scene.over)
+    figure.set_point_colours(0, np.tile([1.0, 0.0, 0.0], (500, 1)))
+    scene = figure.scene()
+    assert scene.colour_axis is None
+    assert np.allclose(scene.lines[0].marker_colours[:, :3], [1.0, 0.0, 0.0])
+
+
+def test_a_click_selects_the_point_under_it_and_the_selection_reads_back():
+    x, y = cloud(400)
+    figure = scatter_of(x, y)
+    drawn = figure.scene().lines[0]
+    px, py = drawn.markers[17]
+    picked = figure.point_at(px, py, points_only=True)
+    assert picked is not None and picked[0] == 0 and picked[1] == drawn.marker_elements[17]
+    version = figure.selection_version
+    figure.press(px, py)
+    figure.release(px, py)
+    assert list(figure.selection(0)) == [drawn.marker_elements[17]]
+    assert figure.selection_version > version
+    figure.line(0).selection = [3, 1, 2]
+    assert list(figure.line(0).selection) == [1, 2, 3]
+    figure.clear_selection()
+    assert len(figure.selection(0)) == 0
+    # The crosshair reads the point and says which it is.
+    figure.hover(px, py)
+    reading = figure.scene().reading
+    assert reading.valid and reading.element == drawn.marker_elements[17]

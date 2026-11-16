@@ -21,7 +21,7 @@ from typing import Callable, Dict, Iterator, Optional, Sequence, Tuple
 import numpy as np
 
 from . import _native
-from .scene import FORM_ALL, Colour, Scene, TextRole, copy_scene
+from .scene import FORM_ALL, Colour, LineKind, Scene, TextRole, copy_scene
 
 _lib = _native.lib
 
@@ -232,6 +232,11 @@ class Line:
     def has_time(self) -> bool:
         return _lib.plotcore_line_has_time(self._figure._handle, self.index) == 1
 
+    @property
+    def kind(self) -> LineKind:
+        """A line, or a scatter's points."""
+        return LineKind(_lib.plotcore_line_kind(self._figure._handle, self.index))
+
     @name.setter
     def name(self, value: str) -> None:
         _check(_lib.plotcore_set_line_name(self._figure._handle, self.index, _encode(value)))
@@ -259,6 +264,15 @@ class Line:
 
     def set_reader(self, reader: Optional[Callable[[int, int], Sequence[float]]]) -> None:
         self._figure.set_line_reader(self.index, reader)
+
+    @property
+    def selection(self) -> np.ndarray:
+        """A scatter's selected points, by element, ascending."""
+        return self._figure.selection(self.index)
+
+    @selection.setter
+    def selection(self, elements) -> None:
+        self._figure.set_selection(self.index, elements)
 
 
 class Figure:
@@ -293,6 +307,101 @@ class Figure:
 
     def __exit__(self, *_exc) -> None:
         self.close()
+
+    # --- points -----------------------------------------------------------
+
+    def add_points(self, x, y, name: str = "") -> int:
+        """Copy points in as a scatter, an x and a y each; its index, among
+        the lines it is numbered with. A point whose x or y is not finite is
+        held and never drawn."""
+        xs = _array(x)
+        ys = _array(y)
+        if xs.size != ys.size:
+            raise ValueError("a point is an x and a y: the two must be as long")
+        index = ctypes.c_int32()
+        _check(_lib.plotcore_add_points(self._handle, _pointer(xs), _pointer(ys), xs.size,
+                                        _encode(name), ctypes.byref(index)))
+        return index.value
+
+    def begin_points(self, count: int, name: str = "") -> int:
+        """A scatter that arrives in pieces: append_points, then finish_line."""
+        index = ctypes.c_int32()
+        _check(_lib.plotcore_begin_points(self._handle, int(count), _encode(name),
+                                          ctypes.byref(index)))
+        return index.value
+
+    def append_points(self, line: int, x, y) -> None:
+        xs = _array(x)
+        ys = _array(y)
+        if xs.size != ys.size:
+            raise ValueError("a point is an x and a y: the two must be as long")
+        _check(_lib.plotcore_append_points(self._handle, int(line), _pointer(xs), _pointer(ys),
+                                           xs.size))
+
+    def set_point_values(self, line: int, values) -> None:
+        """What each point is coloured by, through the colour axis; None
+        clears them."""
+        if values is None:
+            _check(_lib.plotcore_set_point_values(self._handle, int(line), None, 0))
+            return
+        array = _array(values)
+        _check(_lib.plotcore_set_point_values(self._handle, int(line), _pointer(array),
+                                              array.size))
+
+    def set_point_colours(self, line: int, colours) -> None:
+        """Each point's own colour, which beats its value: an N by 3 or N by 4
+        array, of bytes, or of numbers from 0 to 1; None clears them."""
+        if colours is None:
+            _check(_lib.plotcore_set_point_colours(self._handle, int(line), None, 0))
+            return
+        array = np.asarray(colours)
+        if array.ndim != 2 or array.shape[1] not in (3, 4):
+            raise ValueError("a colour a point: an N by 3 or N by 4 array")
+        if array.dtype != np.uint8:
+            array = np.clip(np.rint(np.asarray(array, dtype=np.float64) * 255.0), 0, 255)
+        if array.shape[1] == 3:
+            array = np.concatenate([array, np.full((array.shape[0], 1), 255)], axis=1)
+        rgba = np.ascontiguousarray(array, dtype=np.uint8)
+        _check(_lib.plotcore_set_point_colours(
+            self._handle, int(line), rgba.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            rgba.shape[0]))
+
+    def point_at(self, x: float, y: float, reach: float = 12.0,
+                 points_only: bool = False) -> Optional[Tuple[int, int, float, float]]:
+        """What is under (x, y): the scatter's point whose dot covers it, the
+        last drawn of any, or else the point or sample nearest it within
+        `reach` pixels -- as (line, element, x, y), or None."""
+        picked = _native.Picked()
+        if not _lib.plotcore_point_at(self._handle, float(x), float(y), float(reach),
+                                      int(points_only), ctypes.byref(picked)):
+            return None
+        return (picked.line, picked.element, picked.x, picked.y)
+
+    def selection(self, line: int) -> np.ndarray:
+        """A scatter's selected points, by element, ascending."""
+        count = ctypes.c_int64()
+        _check(_lib.plotcore_get_selection(self._handle, int(line), None, 0, ctypes.byref(count)))
+        out = np.zeros(count.value, dtype=np.int64)
+        if count.value:
+            _check(_lib.plotcore_get_selection(
+                self._handle, int(line), out.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
+                count.value, None))
+        return out
+
+    def set_selection(self, line: int, elements) -> None:
+        chosen = np.ascontiguousarray(np.asarray(elements, dtype=np.int64).ravel())
+        _check(_lib.plotcore_set_selection(
+            self._handle, int(line), chosen.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
+            chosen.size))
+
+    def clear_selection(self) -> None:
+        _check(_lib.plotcore_clear_selection(self._handle))
+
+    @property
+    def selection_version(self) -> int:
+        """Counts every change of any selection: compare it to know whether to
+        ask again."""
+        return int(_lib.plotcore_selection_version(self._handle))
 
     # --- lines ------------------------------------------------------------
 

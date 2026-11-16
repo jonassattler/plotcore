@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <new>
 #include <string>
@@ -45,6 +46,9 @@ struct plotcore_scene
         std::vector<double> markers;
         std::vector<double> bars;
         std::vector<double> barValues;
+        std::vector<double> markerColours;
+        std::vector<int64_t> markerElements;
+        std::vector<double> markerValues;
     };
     std::vector<Line> lines;
 };
@@ -103,6 +107,7 @@ plotcore_mark markOf(const Mark& mark)
     out.stroke = rgbaOf(mark.stroke);
     out.width = mark.width;
     out.radius = mark.radius;
+    out.fill_to = rgbaOf(mark.fillTo);
     if (mark.kind == Mark::Kind::Text) {
         const TextItem& text = mark.text;
         out.role = static_cast<int32_t>(text.role);
@@ -145,6 +150,17 @@ Button buttonOf(plotcore_button button)
 bool hasLine(const plotcore_figure* figure, int32_t line)
 {
     return line >= 0 && line < figure->figure.plot().lineCount();
+}
+
+bool isPoints(const plotcore_figure* figure, int32_t line)
+{
+    return figure->figure.plot().kind(line) == LineKind::Points;
+}
+
+bool isRamp(std::string_view name)
+{
+    const auto& ramps = rampNames();
+    return std::find(ramps.begin(), ramps.end(), name) != ramps.end();
 }
 
 plotcore_status noLine(int32_t line)
@@ -197,19 +213,24 @@ const Field<bool FigureSettings::*> kBools[] = {
     {"bandReadout", &FigureSettings::bandReadout},
     {"paneMessage", &FigureSettings::paneMessage},
     {"lineGestures", &FigureSettings::lineGestures},
+    {"pointGestures", &FigureSettings::pointGestures},
+    {"colourReversed", &FigureSettings::colourReversed},
+    {"colourLog", &FigureSettings::colourLog},
+    {"colourBar", &FigureSettings::colourBar},
 };
 
 const Field<double FigureSettings::*> kNumbers[] = {
-    {"gridStepX", &FigureSettings::gridStepX},
-    {"gridStepY", &FigureSettings::gridStepY},
-    {"xLogBase", &FigureSettings::xLogBase},
-    {"yLogBase", &FigureSettings::yLogBase},
+    {"gridStepX", &FigureSettings::gridStepX},         {"gridStepY", &FigureSettings::gridStepY},
+    {"xLogBase", &FigureSettings::xLogBase},           {"yLogBase", &FigureSettings::yLogBase},
+    {"colourLogBase", &FigureSettings::colourLogBase}, {"colourLow", &FigureSettings::colourLow},
+    {"colourHigh", &FigureSettings::colourHigh},
 };
 
 const Field<std::string FigureSettings::*> kTexts[] = {
     {"title", &FigureSettings::title},
     {"xLabel", &FigureSettings::xLabel},
     {"yLabel", &FigureSettings::yLabel},
+    {"colourLabel", &FigureSettings::colourLabel},
 };
 
 const Field<Rgba LineColours::*> kColours[] = {
@@ -458,6 +479,9 @@ plotcore_status plotcore_append_line(plotcore_figure* figure, int32_t line, cons
     if (figure->figure.plot().ready(line)) {
         return fail(PLOTCORE_ERROR_STATE, "the line is finished");
     }
+    if (isPoints(figure, line)) {
+        return fail(PLOTCORE_ERROR_STATE, "a scatter takes points: plotcore_append_points");
+    }
     return guarded([&] {
         figure->figure.plot().appendToLine(line, values, count);
         return PLOTCORE_OK;
@@ -481,6 +505,12 @@ plotcore_status plotcore_set_line_reader(plotcore_figure* figure, int32_t line,
                                          plotcore_free_context release)
 {
     PLOTCORE_NEED_LINE(figure, line)
+    if (isPoints(figure, line)) {
+        if (release != nullptr) {
+            release(context);
+        }
+        return fail(PLOTCORE_ERROR_STATE, "a scatter is held whole and reads nothing");
+    }
     return guarded([&] {
         if (reader == nullptr) {
             if (release != nullptr) {
@@ -587,6 +617,175 @@ int32_t plotcore_line_has_time(const plotcore_figure* figure, int32_t line)
                                                                                              : 0;
 }
 
+int32_t plotcore_line_kind(const plotcore_figure* figure, int32_t line)
+{
+    if (figure == nullptr || !hasLine(figure, line)) {
+        return -1;
+    }
+    return isPoints(figure, line) ? PLOTCORE_POINTS : PLOTCORE_LINE;
+}
+
+// --- points -------------------------------------------------------------------------------------
+
+plotcore_status plotcore_add_points(plotcore_figure* figure, const double* x, const double* y,
+                                    int64_t count, const char* name, int32_t* line)
+{
+    PLOTCORE_NEED(figure)
+    if (count < 0 || ((x == nullptr || y == nullptr) && count > 0)) {
+        return fail(PLOTCORE_ERROR_ARGUMENT, "points need an x and a y each");
+    }
+    if (count > kMaxScatterPoints) {
+        return fail(PLOTCORE_ERROR_ARGUMENT, "a scatter holds at most 2^31 - 2 points");
+    }
+    return guarded([&] {
+        const int index = figure->figure.plot().addPoints(x, y, count, name != nullptr ? name : "");
+        if (line != nullptr) {
+            *line = index;
+        }
+        return PLOTCORE_OK;
+    });
+}
+
+plotcore_status plotcore_begin_points(plotcore_figure* figure, int64_t count, const char* name,
+                                      int32_t* line)
+{
+    PLOTCORE_NEED(figure)
+    if (count < 0 || count > kMaxScatterPoints) {
+        return fail(PLOTCORE_ERROR_ARGUMENT, "a scatter holds from none to 2^31 - 2 points");
+    }
+    return guarded([&] {
+        const int index = figure->figure.plot().beginPoints(count, name != nullptr ? name : "");
+        if (line != nullptr) {
+            *line = index;
+        }
+        return PLOTCORE_OK;
+    });
+}
+
+plotcore_status plotcore_append_points(plotcore_figure* figure, int32_t line, const double* x,
+                                       const double* y, int64_t count)
+{
+    PLOTCORE_NEED_LINE(figure, line)
+    if (count < 0 || ((x == nullptr || y == nullptr) && count > 0)) {
+        return fail(PLOTCORE_ERROR_ARGUMENT, "points need an x and a y each");
+    }
+    if (!isPoints(figure, line)) {
+        return fail(PLOTCORE_ERROR_STATE, "a line takes values: plotcore_append_line");
+    }
+    if (figure->figure.plot().ready(line)) {
+        return fail(PLOTCORE_ERROR_STATE, "the scatter is finished");
+    }
+    return guarded([&] {
+        figure->figure.plot().appendPoints(line, x, y, count);
+        return PLOTCORE_OK;
+    });
+}
+
+plotcore_status plotcore_set_point_values(plotcore_figure* figure, int32_t line,
+                                          const double* values, int64_t count)
+{
+    PLOTCORE_NEED_LINE(figure, line)
+    if (!isPoints(figure, line) || !figure->figure.plot().ready(line)) {
+        return fail(PLOTCORE_ERROR_STATE, "values go to a finished scatter");
+    }
+    if (values != nullptr && count > 0 && count != figure->figure.plot().length(line)) {
+        return fail(PLOTCORE_ERROR_ARGUMENT, "a value a point");
+    }
+    return guarded([&] {
+        figure->figure.plot().setPointValues(line, values, values != nullptr ? count : 0);
+        return PLOTCORE_OK;
+    });
+}
+
+plotcore_status plotcore_set_point_colours(plotcore_figure* figure, int32_t line,
+                                           const uint8_t* rgba, int64_t count)
+{
+    PLOTCORE_NEED_LINE(figure, line)
+    if (!isPoints(figure, line) || !figure->figure.plot().ready(line)) {
+        return fail(PLOTCORE_ERROR_STATE, "colours go to a finished scatter");
+    }
+    if (rgba != nullptr && count > 0 && count != figure->figure.plot().length(line)) {
+        return fail(PLOTCORE_ERROR_ARGUMENT, "a colour a point");
+    }
+    return guarded([&] {
+        figure->figure.plot().setPointColours(line, rgba, rgba != nullptr ? count : 0);
+        return PLOTCORE_OK;
+    });
+}
+
+int32_t plotcore_point_at(plotcore_figure* figure, double px, double py, double reach,
+                          int32_t points_only, plotcore_picked* out)
+{
+    if (figure == nullptr) {
+        return 0;
+    }
+    try {
+        const std::optional<Picked> picked =
+            figure->figure.pointAt(px, py, reach, points_only != 0);
+        if (!picked.has_value()) {
+            return 0;
+        }
+        if (out != nullptr) {
+            *out = plotcore_picked{picked->line, picked->element, picked->x, picked->y};
+        }
+        return 1;
+    }
+    catch (...) {
+        return 0;
+    }
+}
+
+int64_t plotcore_selection_count(const plotcore_figure* figure, int32_t line)
+{
+    return figure != nullptr ? figure->figure.selectionCount(line) : 0;
+}
+
+plotcore_status plotcore_get_selection(const plotcore_figure* figure, int32_t line,
+                                       int64_t* elements, int64_t capacity, int64_t* count)
+{
+    PLOTCORE_NEED_LINE(figure, line)
+    return guarded([&] {
+        const std::vector<long long> chosen = figure->figure.selection(line);
+        if (count != nullptr) {
+            *count = static_cast<int64_t>(chosen.size());
+        }
+        for (std::size_t i = 0;
+             elements != nullptr && static_cast<int64_t>(i) < capacity && i < chosen.size(); ++i) {
+            elements[i] = chosen[i];
+        }
+        return PLOTCORE_OK;
+    });
+}
+
+plotcore_status plotcore_set_selection(plotcore_figure* figure, int32_t line,
+                                       const int64_t* elements, int64_t count)
+{
+    PLOTCORE_NEED_LINE(figure, line)
+    if (count < 0 || (elements == nullptr && count > 0)) {
+        return fail(PLOTCORE_ERROR_ARGUMENT, "no elements");
+    }
+    if (!isPoints(figure, line)) {
+        return fail(PLOTCORE_ERROR_STATE, "only a scatter's points are selected");
+    }
+    return guarded([&] {
+        std::vector<long long> chosen(elements, elements + count);
+        figure->figure.setSelection(line, chosen);
+        return PLOTCORE_OK;
+    });
+}
+
+plotcore_status plotcore_clear_selection(plotcore_figure* figure)
+{
+    PLOTCORE_NEED(figure)
+    figure->figure.clearSelection();
+    return PLOTCORE_OK;
+}
+
+uint64_t plotcore_selection_version(const plotcore_figure* figure)
+{
+    return figure != nullptr ? figure->figure.selectionVersion() : 0;
+}
+
 // --- x ----------------------------------------------------------------------------------------
 
 plotcore_status plotcore_set_index_axis(plotcore_figure* figure, double start, double step)
@@ -619,6 +818,9 @@ plotcore_status plotcore_set_line_time(plotcore_figure* figure, int32_t line, co
     PLOTCORE_NEED_LINE(figure, line)
     if (count < 0 || (values == nullptr && count > 0)) {
         return fail(PLOTCORE_ERROR_ARGUMENT, "no times");
+    }
+    if (isPoints(figure, line)) {
+        return fail(PLOTCORE_ERROR_STATE, "a scatter's x is its own");
     }
     return guarded([&] {
         figure->figure.plot().setLineTime(line, values, count);
@@ -703,7 +905,8 @@ plotcore_status plotcore_set_number(plotcore_figure* figure, const char* name, d
         FigureSettings settings = figure->figure.settings();
         const std::string_view key = name != nullptr ? name : "";
         if (const auto* field = find(kNumbers, name)) {
-            if ((key == "xLogBase" || key == "yLogBase") && !usableBase(value)) {
+            if ((key == "xLogBase" || key == "yLogBase" || key == "colourLogBase") &&
+                !usableBase(value)) {
                 return fail(PLOTCORE_ERROR_ARGUMENT, "a base is a number above one");
             }
             if ((key == "gridStepX" || key == "gridStepY") && value < 0.0) {
@@ -754,6 +957,18 @@ plotcore_status plotcore_set_text(plotcore_figure* figure, const char* name, con
             if (!drawingOf(value, settings.drawing)) {
                 return fail(PLOTCORE_ERROR_ARGUMENT, std::string("no such drawing: ") + value);
             }
+        }
+        else if (key == "pointDrawing") {
+            if (!pointDrawingOf(value, settings.pointDrawing)) {
+                return fail(PLOTCORE_ERROR_ARGUMENT,
+                            std::string("no such point drawing: ") + value);
+            }
+        }
+        else if (key == "colourMap") {
+            if (!isRamp(value)) {
+                return fail(PLOTCORE_ERROR_ARGUMENT, std::string("no such map: ") + value);
+            }
+            settings.colourMap = value;
         }
         else if (key == "colours.mode") {
             if (!isColourMode(value)) {
@@ -868,6 +1083,12 @@ plotcore_status plotcore_get_text(const plotcore_figure* figure, const char* nam
         }
         if (key == "drawing") {
             return copyText(drawingName(settings.drawing), buffer, capacity, length);
+        }
+        if (key == "pointDrawing") {
+            return copyText(pointDrawingName(settings.pointDrawing), buffer, capacity, length);
+        }
+        if (key == "colourMap") {
+            return copyText(settings.colourMap, buffer, capacity, length);
         }
         if (key == "colours.mode") {
             return copyText(settings.colours.mode, buffer, capacity, length);
@@ -1310,6 +1531,14 @@ plotcore_scene* snapshot(plotcore_figure* figure, const SceneRequest& request)
             flattened.markers = flat(line.markers);
             flattened.bars = flat(line.bars);
             flattened.barValues = flat(line.barValues);
+            flattened.markerColours.reserve(line.markerColours.size() * 4);
+            for (const Rgba& colour : line.markerColours) {
+                flattened.markerColours.insert(
+                    flattened.markerColours.end(),
+                    {colour.red, colour.green, colour.blue, colour.alpha});
+            }
+            flattened.markerElements.assign(line.markerElements.begin(), line.markerElements.end());
+            flattened.markerValues = flat(line.markerValues);
             out->lines.push_back(std::move(flattened));
         }
         return out.release();
@@ -1342,6 +1571,7 @@ plotcore_scene* plotcore_scene_request_new(plotcore_figure* figure,
     asked.geometry.strips = (request->forms & PLOTCORE_FORM_STRIPS) != 0;
     asked.geometry.values = (request->forms & PLOTCORE_FORM_VALUES) != 0;
     asked.geometry.bars = (request->forms & PLOTCORE_FORM_BARS) != 0;
+    asked.geometry.images = (request->forms & PLOTCORE_FORM_IMAGE) != 0;
     asked.picture = request->picture != 0;
     asked.width = request->width;
     asked.height = request->height;
@@ -1453,6 +1683,12 @@ plotcore_status plotcore_scene_line(const plotcore_scene* scene, int64_t index,
     out->y_log = line.yLogarithmic ? 1 : 0;
     out->own = line.own ? 1 : 0;
     out->numbered = line.numbered ? 1 : 0;
+    out->kind = line.kind == LineKind::Points ? PLOTCORE_POINTS : PLOTCORE_LINE;
+    out->coloured = line.markerColours.empty() ? 0 : 1;
+    out->image_width = line.image.has_value() ? line.image->width : 0;
+    out->image_height = line.image.has_value() ? line.image->height : 0;
+    out->image_rect =
+        line.image.has_value() ? rectOf(line.image->at) : plotcore_rect{0.0, 0.0, 0.0, 0.0};
     return PLOTCORE_OK;
 }
 
@@ -1546,6 +1782,45 @@ const double* plotcore_scene_line_bar_values(const plotcore_scene* scene, int64_
     return values.empty() ? nullptr : values.data();
 }
 
+const double* plotcore_scene_line_marker_colours(const plotcore_scene* scene, int64_t index)
+{
+    if (!hasDrawn(scene, index)) {
+        return nullptr;
+    }
+    const std::vector<double>& colours =
+        scene->lines[static_cast<std::size_t>(index)].markerColours;
+    return colours.empty() ? nullptr : colours.data();
+}
+
+const int64_t* plotcore_scene_line_marker_elements(const plotcore_scene* scene, int64_t index)
+{
+    if (!hasDrawn(scene, index)) {
+        return nullptr;
+    }
+    const std::vector<int64_t>& elements =
+        scene->lines[static_cast<std::size_t>(index)].markerElements;
+    return elements.empty() ? nullptr : elements.data();
+}
+
+const double* plotcore_scene_line_marker_values(const plotcore_scene* scene, int64_t index)
+{
+    if (!hasDrawn(scene, index)) {
+        return nullptr;
+    }
+    const std::vector<double>& values = scene->lines[static_cast<std::size_t>(index)].markerValues;
+    return values.empty() ? nullptr : values.data();
+}
+
+const uint8_t* plotcore_scene_line_image(const plotcore_scene* scene, int64_t index)
+{
+    if (!hasDrawn(scene, index)) {
+        return nullptr;
+    }
+    const std::optional<PaneImage>& image =
+        scene->scene.lines[static_cast<std::size_t>(index)].image;
+    return image.has_value() && !image->rgba.empty() ? image->rgba.data() : nullptr;
+}
+
 int64_t plotcore_scene_under_count(const plotcore_scene* scene)
 {
     return scene != nullptr ? static_cast<int64_t>(scene->under.size()) : 0;
@@ -1598,6 +1873,7 @@ plotcore_status plotcore_scene_legend(const plotcore_scene* scene, int64_t index
     out->text_x = entry.textAt.x();
     out->text_y = entry.textAt.y();
     out->name = entry.name.c_str();
+    out->kind = entry.kind == LineKind::Points ? PLOTCORE_POINTS : PLOTCORE_LINE;
     return PLOTCORE_OK;
 }
 
@@ -1608,7 +1884,8 @@ plotcore_rect plotcore_scene_legend_rect(const plotcore_scene* scene)
 
 plotcore_reading plotcore_scene_reading(const plotcore_scene* scene)
 {
-    plotcore_reading out{0, -1, 0.0, 0.0, 0.0, 0.0, "", ""};
+    plotcore_reading out{
+        0, -1, 0.0, 0.0, 0.0, 0.0, "", "", -1, std::numeric_limits<double>::quiet_NaN(), ""};
     if (scene == nullptr || !scene->scene.reading.valid) {
         return out;
     }
@@ -1621,6 +1898,9 @@ plotcore_reading plotcore_scene_reading(const plotcore_scene* scene)
     out.py = reading.at.y();
     out.x_text = reading.xText.c_str();
     out.y_text = reading.yText.c_str();
+    out.element = reading.element;
+    out.value = reading.value;
+    out.value_text = reading.valueText.c_str();
     return out;
 }
 
@@ -1631,6 +1911,28 @@ int32_t plotcore_scene_band(const plotcore_scene* scene, plotcore_rect* band)
     }
     if (band != nullptr) {
         *band = rectOf(*scene->scene.band);
+    }
+    return 1;
+}
+
+int32_t plotcore_scene_colour_axis(const plotcore_scene* scene, double* low, double* high,
+                                   int32_t* logarithmic, plotcore_rect* bar)
+{
+    if (scene == nullptr || !scene->scene.colourAxis.has_value()) {
+        return 0;
+    }
+    const SceneAxis& axis = *scene->scene.colourAxis;
+    if (low != nullptr) {
+        *low = axis.window.low;
+    }
+    if (high != nullptr) {
+        *high = axis.window.high;
+    }
+    if (logarithmic != nullptr) {
+        *logarithmic = axis.logarithmic ? 1 : 0;
+    }
+    if (bar != nullptr) {
+        *bar = rectOf(axis.box);
     }
     return 1;
 }

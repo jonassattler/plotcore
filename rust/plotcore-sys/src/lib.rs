@@ -14,7 +14,7 @@
 
 use std::ffi::{c_char, c_double, c_int, c_void};
 
-pub const PLOTCORE_ABI_VERSION: i32 = 2;
+pub const PLOTCORE_ABI_VERSION: i32 = 3;
 
 pub type plotcore_status = c_int;
 pub const PLOTCORE_OK: plotcore_status = 0;
@@ -57,7 +57,12 @@ pub const PLOTCORE_FORM_TRIANGLES: i32 = 2;
 pub const PLOTCORE_FORM_STRIPS: i32 = 4;
 pub const PLOTCORE_FORM_VALUES: i32 = 8;
 pub const PLOTCORE_FORM_BARS: i32 = 16;
-pub const PLOTCORE_FORM_ALL: i32 = 31;
+pub const PLOTCORE_FORM_IMAGE: i32 = 32;
+pub const PLOTCORE_FORM_ALL: i32 = 63;
+
+pub type plotcore_kind = c_int;
+pub const PLOTCORE_LINE: plotcore_kind = 0;
+pub const PLOTCORE_POINTS: plotcore_kind = 1;
 
 pub type plotcore_appetite = c_int;
 pub const PLOTCORE_APPETITE_LOW: plotcore_appetite = 0;
@@ -108,6 +113,11 @@ pub struct plotcore_line_info {
     pub y_log: i32,
     pub own: i32,
     pub numbered: i32,
+    pub kind: i32,
+    pub coloured: i32,
+    pub image_width: i64,
+    pub image_height: i64,
+    pub image_rect: plotcore_rect,
 }
 
 #[repr(C)]
@@ -134,6 +144,7 @@ pub struct plotcore_mark {
     pub text: *const c_char,
     pub base: *const c_char,
     pub exponent: *const c_char,
+    pub fill_to: plotcore_rgba,
 }
 
 impl Default for plotcore_mark {
@@ -160,6 +171,7 @@ impl Default for plotcore_mark {
             text: std::ptr::null(),
             base: std::ptr::null(),
             exponent: std::ptr::null(),
+            fill_to: plotcore_rgba::default(),
         }
     }
 }
@@ -192,6 +204,7 @@ pub struct plotcore_legend_entry {
     pub text_x: c_double,
     pub text_y: c_double,
     pub name: *const c_char,
+    pub kind: i32,
 }
 
 #[repr(C)]
@@ -205,6 +218,18 @@ pub struct plotcore_reading {
     pub py: c_double,
     pub x_text: *const c_char,
     pub y_text: *const c_char,
+    pub element: i64,
+    pub value: c_double,
+    pub value_text: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct plotcore_picked {
+    pub line: i32,
+    pub element: i64,
+    pub x: c_double,
+    pub y: c_double,
 }
 
 /// An opaque figure.
@@ -301,6 +326,66 @@ unsafe extern "C" {
     ) -> plotcore_status;
     pub fn plotcore_line_ready(figure: *const plotcore_figure, line: i32) -> i32;
     pub fn plotcore_line_has_time(figure: *const plotcore_figure, line: i32) -> i32;
+    pub fn plotcore_line_kind(figure: *const plotcore_figure, line: i32) -> i32;
+
+    // --- points
+    pub fn plotcore_add_points(
+        figure: *mut plotcore_figure,
+        x: *const c_double,
+        y: *const c_double,
+        count: i64,
+        name: *const c_char,
+        line: *mut i32,
+    ) -> plotcore_status;
+    pub fn plotcore_begin_points(
+        figure: *mut plotcore_figure,
+        count: i64,
+        name: *const c_char,
+        line: *mut i32,
+    ) -> plotcore_status;
+    pub fn plotcore_append_points(
+        figure: *mut plotcore_figure,
+        line: i32,
+        x: *const c_double,
+        y: *const c_double,
+        count: i64,
+    ) -> plotcore_status;
+    pub fn plotcore_set_point_values(
+        figure: *mut plotcore_figure,
+        line: i32,
+        values: *const c_double,
+        count: i64,
+    ) -> plotcore_status;
+    pub fn plotcore_set_point_colours(
+        figure: *mut plotcore_figure,
+        line: i32,
+        rgba: *const u8,
+        count: i64,
+    ) -> plotcore_status;
+    pub fn plotcore_point_at(
+        figure: *mut plotcore_figure,
+        px: c_double,
+        py: c_double,
+        reach: c_double,
+        points_only: i32,
+        out: *mut plotcore_picked,
+    ) -> i32;
+    pub fn plotcore_selection_count(figure: *const plotcore_figure, line: i32) -> i64;
+    pub fn plotcore_get_selection(
+        figure: *const plotcore_figure,
+        line: i32,
+        elements: *mut i64,
+        capacity: i64,
+        count: *mut i64,
+    ) -> plotcore_status;
+    pub fn plotcore_set_selection(
+        figure: *mut plotcore_figure,
+        line: i32,
+        elements: *const i64,
+        count: i64,
+    ) -> plotcore_status;
+    pub fn plotcore_clear_selection(figure: *mut plotcore_figure) -> plotcore_status;
+    pub fn plotcore_selection_version(figure: *const plotcore_figure) -> u64;
 
     // --- x
     pub fn plotcore_set_index_axis(
@@ -578,6 +663,19 @@ unsafe extern "C" {
         scene: *const plotcore_scene,
         index: i64,
     ) -> *const c_double;
+    pub fn plotcore_scene_line_marker_colours(
+        scene: *const plotcore_scene,
+        index: i64,
+    ) -> *const c_double;
+    pub fn plotcore_scene_line_marker_elements(
+        scene: *const plotcore_scene,
+        index: i64,
+    ) -> *const i64;
+    pub fn plotcore_scene_line_marker_values(
+        scene: *const plotcore_scene,
+        index: i64,
+    ) -> *const c_double;
+    pub fn plotcore_scene_line_image(scene: *const plotcore_scene, index: i64) -> *const u8;
     pub fn plotcore_scene_under_count(scene: *const plotcore_scene) -> i64;
     pub fn plotcore_scene_under(
         scene: *const plotcore_scene,
@@ -599,6 +697,13 @@ unsafe extern "C" {
     pub fn plotcore_scene_legend_rect(scene: *const plotcore_scene) -> plotcore_rect;
     pub fn plotcore_scene_reading(scene: *const plotcore_scene) -> plotcore_reading;
     pub fn plotcore_scene_band(scene: *const plotcore_scene, band: *mut plotcore_rect) -> i32;
+    pub fn plotcore_scene_colour_axis(
+        scene: *const plotcore_scene,
+        low: *mut c_double,
+        high: *mut c_double,
+        logarithmic: *mut i32,
+        bar: *mut plotcore_rect,
+    ) -> i32;
 }
 
 #[cfg(test)]
@@ -628,6 +733,7 @@ mod tests {
             std::mem::size_of::<plotcore_scene_request>(),
             std::mem::size_of::<plotcore_legend_entry>(),
             std::mem::size_of::<plotcore_reading>(),
+            std::mem::size_of::<plotcore_picked>(),
         ];
         for (which, size) in rust.iter().enumerate() {
             // SAFETY: a pure function of its argument.

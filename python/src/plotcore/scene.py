@@ -58,14 +58,23 @@ class Layer(enum.IntEnum):
     OVERLAY = 2
 
 
+class LineKind(enum.IntEnum):
+    """What a line is: elements along the figure's x, or a scatter's points."""
+
+    LINE = 0
+    POINTS = 1
+
+
 #: The forms of a line a scene can carry; `Figure.scene(forms=...)` takes
-#: them or-ed together.
+#: them or-ed together. A host that paints no images leaves out FORM_IMAGE and
+#: is handed every point of a scatter as a marker.
 FORM_RUNS = 1
 FORM_TRIANGLES = 2
 FORM_STRIPS = 4
 FORM_VALUES = 8
 FORM_BARS = 16
-FORM_ALL = 31
+FORM_IMAGE = 32
+FORM_ALL = 63
 
 
 @dataclass(frozen=True)
@@ -89,6 +98,27 @@ class Chrome:
 
 
 @dataclass
+class Image:
+    """A dense scatter as a picture of part of the pane: `pixels` is height by
+    width by four bytes of premultiplied red, green, blue and alpha, the top
+    row first, to be painted over `rect` in pane pixels."""
+
+    pixels: np.ndarray
+    rect: "Rect"
+
+
+@dataclass
+class ColourAxis:
+    """The colour bar, while it is drawn: what it runs between, whether it is
+    logarithmic, and where the bar is. `over` paints it."""
+
+    low: float
+    high: float
+    log: bool
+    bar: "Rect"
+
+
+@dataclass
 class Line:
     """One drawn line. Points are pane pixels with y down; `values` are the
     same points in the data's own units, for a host whose axes are its own.
@@ -96,7 +126,13 @@ class Line:
     `bars` is the line as one bar a device column, when the setting `bars` is on
     and the line is dense enough, and it then has no runs, strips or triangles:
     two corners a bar, its top left and its bottom right, to fill antialiased in
-    the line's colour. `bar_values` is the same corners in the data's units."""
+    the line's colour. `bar_values` is the same corners in the data's units.
+
+    A scatter (`kind` POINTS) has no runs, triangles or bars: its points are
+    `markers`, each in its own colour where `marker_colours` has them (an N by
+    4 array, not premultiplied) and painted in this order, or, when it is
+    dense, an `image` of the pane. `marker_elements` says which point each
+    marker is, and `marker_values` where, in the data's own units."""
 
     line: int
     colour: Colour
@@ -114,6 +150,11 @@ class Line:
     y_log: bool
     own: bool
     numbered: bool
+    kind: LineKind = LineKind.LINE
+    marker_colours: np.ndarray = field(default_factory=lambda: np.zeros((0, 4)))
+    marker_elements: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
+    marker_values: np.ndarray = field(default_factory=lambda: np.zeros((0, 2)))
+    image: Optional[Image] = None
 
 
 @dataclass
@@ -124,7 +165,8 @@ class Mark:
     A SEGMENT runs from (x0, y0) to (x1, y1) in `stroke` at `width`. A BOX
     runs from its top left (x0, y0) to its bottom right (x1, y1), filled with
     `fill` and edged in `stroke` at `width`, its corners rounded to `radius`
-    and its edge in dashes when `dashed`. A CIRCLE is about (x0, y0) at
+    and its edge in dashes when `dashed`, from `fill` at its top to `fill_to`
+    at its bottom when that is not clear. A CIRCLE is about (x0, y0) at
     `radius`, edged inside its bounds. A TEXT is at (x0, y0): `base` in `role`'s face and `exponent`
     raised `rise` above it in TICK_MINOR's, `text` both in one string, turned
     `turn` degrees clockwise about that point and aligned in the turned frame.
@@ -152,6 +194,7 @@ class Mark:
     text: str = ""
     base: str = ""
     exponent: str = ""
+    fill_to: Colour = (0.0, 0.0, 0.0, 0.0)
 
 
 @dataclass
@@ -161,6 +204,7 @@ class LegendEntry:
     name: str
     swatch: Tuple[float, float, float, float]
     text_at: Tuple[float, float]
+    kind: LineKind = LineKind.LINE
 
 
 @dataclass
@@ -173,6 +217,12 @@ class Reading:
     py: float = 0.0
     x_text: str = ""
     y_text: str = ""
+    #: Which element of its line it is, or -1 where the drawing does not say.
+    element: int = -1
+    #: What a scatter's point is coloured by, or NaN, and written as the colour
+    #: bar writes it.
+    value: float = float("nan")
+    value_text: str = ""
 
 
 @dataclass
@@ -197,6 +247,8 @@ class Scene:
     legend_rect: Optional[Rect] = None
     reading: Reading = field(default_factory=Reading)
     band: Optional[Rect] = None
+    #: The colour bar, while it is drawn.
+    colour_axis: Optional[ColourAxis] = None
 
     @property
     def texts(self) -> List[Mark]:
@@ -252,6 +304,7 @@ def _marks(handle, count: int, at) -> List[Mark]:
             stroke=_colour(raw.stroke),
             width=raw.width,
             radius=raw.radius,
+            fill_to=_colour(raw.fill_to),
         )
         if kind == MarkKind.TEXT:
             mark.role = TextRole(raw.role)
@@ -303,6 +356,19 @@ def copy_scene(handle) -> Scene:
             if strip:
                 strips.append(_points(lib.plotcore_scene_line_strip(handle, index, run), strip))
         bars = lib.plotcore_scene_line_bar_count(handle, index)
+        markers = info.marker_count
+        colours = lib.plotcore_scene_line_marker_colours(handle, index)
+        elements = lib.plotcore_scene_line_marker_elements(handle, index)
+        where = lib.plotcore_scene_line_marker_values(handle, index)
+        image = None
+        if info.image_width > 0 and info.image_height > 0:
+            pixels = lib.plotcore_scene_line_image(handle, index)
+            shape = (int(info.image_height), int(info.image_width), 4)
+            image = Image(
+                pixels=np.ctypeslib.as_array(pixels, shape=(shape[0] * shape[1] * 4,))
+                .reshape(shape).copy(),
+                rect=_rect(info.image_rect),
+            )
         scene.lines.append(
             Line(
                 line=info.line,
@@ -323,6 +389,17 @@ def copy_scene(handle) -> Scene:
                 y_log=bool(info.y_log),
                 own=bool(info.own),
                 numbered=bool(info.numbered),
+                kind=LineKind(info.kind),
+                marker_colours=(
+                    np.ctypeslib.as_array(colours, shape=(markers * 4,)).reshape(markers, 4).copy()
+                    if colours and markers > 0 else np.zeros((0, 4))
+                ),
+                marker_elements=(
+                    np.ctypeslib.as_array(elements, shape=(markers,)).copy()
+                    if elements and markers > 0 else np.zeros(0, dtype=np.int64)
+                ),
+                marker_values=_points(where, markers) if where else np.zeros((0, 2)),
+                image=image,
             )
         )
     scene.under = _marks(handle, lib.plotcore_scene_under_count(handle), lib.plotcore_scene_under)
@@ -337,6 +414,7 @@ def copy_scene(handle) -> Scene:
                 name=_text(entry.name),
                 swatch=(entry.x0, entry.y0, entry.x1, entry.y1),
                 text_at=(entry.text_x, entry.text_y),
+                kind=LineKind(entry.kind),
             )
         )
     if scene.legend:
@@ -351,8 +429,18 @@ def copy_scene(handle) -> Scene:
         py=reading.py,
         x_text=_text(reading.x_text),
         y_text=_text(reading.y_text),
+        element=int(reading.element),
+        value=float(reading.value),
+        value_text=_text(reading.value_text),
     )
     band = _native.Rect()
     if lib.plotcore_scene_band(handle, ctypes.byref(band)):
         scene.band = _rect(band)
+    low = ctypes.c_double()
+    high = ctypes.c_double()
+    log = ctypes.c_int32()
+    bar = _native.Rect()
+    if lib.plotcore_scene_colour_axis(handle, ctypes.byref(low), ctypes.byref(high),
+                                      ctypes.byref(log), ctypes.byref(bar)):
+        scene.colour_axis = ColourAxis(low.value, high.value, bool(log.value), _rect(bar))
     return scene

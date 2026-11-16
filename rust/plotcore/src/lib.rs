@@ -318,11 +318,67 @@ pub struct Chrome {
     pub cursor_ink: Rgba,
 }
 
+/// What a line is: elements along the figure's x, or a scatter's points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineKind {
+    #[default]
+    Line,
+    Points,
+}
+
+impl LineKind {
+    fn of(raw: i32) -> Self {
+        if raw == sys::PLOTCORE_POINTS {
+            LineKind::Points
+        } else {
+            LineKind::Line
+        }
+    }
+}
+
+/// A dense scatter as a picture of part of the pane: `width` by `height`
+/// device pixels of premultiplied red, green, blue and alpha, a byte each, the
+/// top row first, to be painted over `rect` in pane pixels.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Image {
+    pub width: usize,
+    pub height: usize,
+    pub rect: Rect,
+    pub rgba: Vec<u8>,
+}
+
+/// The colour bar, while it is drawn: what it runs between, whether it is
+/// logarithmic, and where the bar is. `over` paints it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ColourAxis {
+    pub low: f64,
+    pub high: f64,
+    pub log: bool,
+    pub bar: Rect,
+}
+
+/// A point or a sample under the pointer, named: see `Figure::point_at`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Picked {
+    pub line: i32,
+    /// Its element, or -1 where the drawing does not say.
+    pub element: i64,
+    pub x: f64,
+    pub y: f64,
+}
+
 /// One drawn line. Points are pane pixels with y down; `values` are the same
 /// points in the data's own units.
+///
+/// A scatter (`kind` Points) has no runs, triangles or bars: its points are
+/// `markers`, each in its own colour where `marker_colours` has them and
+/// painted in this order, or, when it is dense, an `image` of the pane.
+/// `marker_elements` says which point each marker is, and `marker_values`
+/// where, in the data's own units.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DrawnLine {
     pub line: i32,
+    pub kind: LineKind,
     pub colour: Rgba,
     pub width: f64,
     pub marker_radius: f64,
@@ -344,6 +400,10 @@ pub struct DrawnLine {
     pub y_log: bool,
     pub own: bool,
     pub numbered: bool,
+    pub marker_colours: Vec<Rgba>,
+    pub marker_elements: Vec<i64>,
+    pub marker_values: Vec<[f64; 2]>,
+    pub image: Option<Image>,
 }
 
 /// What a mark is.
@@ -374,7 +434,8 @@ pub enum Layer {
 /// A segment runs from (x0, y0) to (x1, y1) in `stroke` at `width`. A box runs
 /// from its top left (x0, y0) to its bottom right (x1, y1), filled with `fill`
 /// and edged in `stroke` at `width`, its corners rounded to `radius` and its
-/// edge in dashes when `dashed`. A circle is about (x0, y0) at `radius`. A text
+/// edge in dashes when `dashed`, from `fill` at its top to `fill_to` at its
+/// bottom when that is not clear. A circle is about (x0, y0) at `radius`. A text
 /// is at (x0, y0): `base` in `role`'s face and `exponent` raised `raise` above
 /// it in TickMinor's, `text` both in one string, turned `turn` degrees
 /// clockwise about that point and aligned in the turned frame. A clear fill is
@@ -403,6 +464,7 @@ pub struct Mark {
     pub text: String,
     pub base: String,
     pub exponent: String,
+    pub fill_to: Rgba,
 }
 
 /// What a scene is asked for: see `Figure::scene_for`.
@@ -440,6 +502,9 @@ pub const FORM_TRIANGLES: i32 = sys::PLOTCORE_FORM_TRIANGLES;
 pub const FORM_STRIPS: i32 = sys::PLOTCORE_FORM_STRIPS;
 pub const FORM_VALUES: i32 = sys::PLOTCORE_FORM_VALUES;
 pub const FORM_BARS: i32 = sys::PLOTCORE_FORM_BARS;
+/// A host that paints images asks for this; one that does not is handed every
+/// point of a scatter as a marker.
+pub const FORM_IMAGE: i32 = sys::PLOTCORE_FORM_IMAGE;
 pub const FORM_ALL: i32 = sys::PLOTCORE_FORM_ALL;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -449,6 +514,8 @@ pub struct LegendEntry {
     pub name: String,
     pub swatch: [f64; 4],
     pub text_at: [f64; 2],
+    /// A scatter's swatch is a dot.
+    pub kind: LineKind,
 }
 
 /// The sample under the pointer.
@@ -461,6 +528,12 @@ pub struct Reading {
     pub py: f64,
     pub x_text: String,
     pub y_text: String,
+    /// Which element of its line it is, or -1 where the drawing does not say.
+    pub element: i64,
+    /// What a scatter's point is coloured by, or NaN, and as the colour bar
+    /// writes it.
+    pub value: f64,
+    pub value_text: String,
 }
 
 /// One frame, owned: nothing in it refers to the library.
@@ -487,6 +560,8 @@ pub struct Scene {
     pub legend_rect: Option<Rect>,
     pub reading: Option<Reading>,
     pub band: Option<Rect>,
+    /// The colour bar, while it is drawn.
+    pub colour_axis: Option<ColourAxis>,
 }
 
 impl Scene {
@@ -548,6 +623,7 @@ unsafe fn marks(
             stroke: m.stroke.into(),
             width: m.width,
             radius: m.radius,
+            fill_to: m.fill_to.into(),
             ..Mark::default()
         };
         if kind == MarkKind::Text {
@@ -594,8 +670,42 @@ unsafe fn copy_scene(scene: *const sys::plotcore_scene) -> Scene {
         for index in 0..sys::plotcore_scene_line_count(scene) {
             let mut info = sys::plotcore_line_info::default();
             sys::plotcore_scene_line(scene, index, &mut info);
+            let markers = info.marker_count.max(0) as usize;
+            let colours = sys::plotcore_scene_line_marker_colours(scene, index);
+            let elements = sys::plotcore_scene_line_marker_elements(scene, index);
+            let image = sys::plotcore_scene_line_image(scene, index);
             let mut line = DrawnLine {
                 line: info.line,
+                kind: LineKind::of(info.kind),
+                marker_colours: if colours.is_null() || markers == 0 {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(colours, markers * 4)
+                        .chunks_exact(4)
+                        .map(|c| Rgba::new(c[0], c[1], c[2], c[3]))
+                        .collect()
+                },
+                marker_elements: if elements.is_null() || markers == 0 {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(elements, markers).to_vec()
+                },
+                marker_values: points(
+                    sys::plotcore_scene_line_marker_values(scene, index),
+                    info.marker_count,
+                ),
+                image: if image.is_null() || info.image_width <= 0 || info.image_height <= 0 {
+                    None
+                } else {
+                    let width = info.image_width as usize;
+                    let height = info.image_height as usize;
+                    Some(Image {
+                        width,
+                        height,
+                        rect: info.image_rect.into(),
+                        rgba: std::slice::from_raw_parts(image, width * height * 4).to_vec(),
+                    })
+                },
                 colour: info.colour.into(),
                 width: info.width,
                 marker_radius: info.marker_radius,
@@ -647,6 +757,7 @@ unsafe fn copy_scene(scene: *const sys::plotcore_scene) -> Scene {
                 name: text_of(e.name),
                 swatch: [e.x0, e.y0, e.x1, e.y1],
                 text_at: [e.text_x, e.text_y],
+                kind: LineKind::of(e.kind),
             });
         }
         if !out.legend.is_empty() {
@@ -662,11 +773,24 @@ unsafe fn copy_scene(scene: *const sys::plotcore_scene) -> Scene {
                 py: r.py,
                 x_text: text_of(r.x_text),
                 y_text: text_of(r.y_text),
+                element: r.element,
+                value: r.value,
+                value_text: text_of(r.value_text),
             });
         }
         let mut band = sys::plotcore_rect::default();
         if sys::plotcore_scene_band(scene, &mut band) != 0 {
             out.band = Some(band.into());
+        }
+        let mut axis = ColourAxis::default();
+        let mut log = 0;
+        let mut bar = sys::plotcore_rect::default();
+        if sys::plotcore_scene_colour_axis(scene, &mut axis.low, &mut axis.high, &mut log, &mut bar)
+            != 0
+        {
+            axis.log = log != 0;
+            axis.bar = bar.into();
+            out.colour_axis = Some(axis);
         }
         out
     }
@@ -844,6 +968,136 @@ impl Figure {
             unsafe { release_reader(context) };
         }
         check(status)
+    }
+
+    // --- points ---------------------------------------------------------------
+
+    /// Copy points in as a scatter, an x and a y each; its index, among the
+    /// lines it is numbered with. A point whose x or y is not finite is held
+    /// and never drawn.
+    pub fn add_points(&mut self, x: &[f64], y: &[f64], name: &str) -> Result<i32> {
+        if x.len() != y.len() {
+            return Err(Error {
+                status: Status::Argument,
+                message: "a point is an x and a y: the two must be as long".into(),
+            });
+        }
+        let name = c_string(name)?;
+        let mut line = -1;
+        // SAFETY: both slices are as long as the count, and copied in the call.
+        check(unsafe {
+            sys::plotcore_add_points(
+                self.raw(),
+                x.as_ptr(),
+                y.as_ptr(),
+                x.len() as i64,
+                name.as_ptr(),
+                &mut line,
+            )
+        })?;
+        Ok(line)
+    }
+
+    /// A scatter that arrives in pieces: `append_points`, then `finish_line`.
+    pub fn begin_points(&mut self, count: usize, name: &str) -> Result<i32> {
+        let name = c_string(name)?;
+        let mut line = -1;
+        // SAFETY: plain values and a string that outlives the call.
+        check(unsafe {
+            sys::plotcore_begin_points(self.raw(), count as i64, name.as_ptr(), &mut line)
+        })?;
+        Ok(line)
+    }
+
+    pub fn append_points(&mut self, line: i32, x: &[f64], y: &[f64]) -> Result<()> {
+        if x.len() != y.len() {
+            return Err(Error {
+                status: Status::Argument,
+                message: "a point is an x and a y: the two must be as long".into(),
+            });
+        }
+        // SAFETY: both slices are as long as the count, and copied in the call.
+        check(unsafe {
+            sys::plotcore_append_points(self.raw(), line, x.as_ptr(), y.as_ptr(), x.len() as i64)
+        })
+    }
+
+    /// What each point is coloured by, through the colour axis; None clears them.
+    pub fn set_point_values(&mut self, line: i32, values: Option<&[f64]>) -> Result<()> {
+        let (pointer, count) = values.map_or((std::ptr::null(), 0), |v| (v.as_ptr(), v.len()));
+        // SAFETY: `count` values at `pointer`, copied in the call.
+        check(unsafe { sys::plotcore_set_point_values(self.raw(), line, pointer, count as i64) })
+    }
+
+    /// Each point's own colour -- red, green, blue and alpha, not premultiplied
+    /// -- which beats its value; None clears them.
+    pub fn set_point_colours(&mut self, line: i32, colours: Option<&[[u8; 4]]>) -> Result<()> {
+        let (pointer, count) =
+            colours.map_or((std::ptr::null(), 0), |c| (c.as_ptr().cast::<u8>(), c.len()));
+        // SAFETY: `count` colours of four bytes at `pointer`, copied in the call.
+        check(unsafe { sys::plotcore_set_point_colours(self.raw(), line, pointer, count as i64) })
+    }
+
+    /// A line, or a scatter's points.
+    pub fn line_kind(&self, line: i32) -> LineKind {
+        // SAFETY: a read of the figure.
+        LineKind::of(unsafe { sys::plotcore_line_kind(self.raw(), line) })
+    }
+
+    /// What is under (`x`, `y`): the scatter's point whose dot covers it, the
+    /// last drawn of any, or else the point or sample nearest it within `reach`
+    /// pixels. `points_only` asks of the scatters alone.
+    pub fn point_at(&mut self, x: f64, y: f64, reach: f64, points_only: bool) -> Option<Picked> {
+        let mut picked = sys::plotcore_picked::default();
+        // SAFETY: plain values and a structure to fill.
+        let found = unsafe {
+            sys::plotcore_point_at(self.raw(), x, y, reach, points_only as i32, &mut picked)
+        };
+        (found != 0).then_some(Picked {
+            line: picked.line,
+            element: picked.element,
+            x: picked.x,
+            y: picked.y,
+        })
+    }
+
+    /// A scatter's selected points, by element, ascending.
+    pub fn selection(&self, line: i32) -> Result<Vec<i64>> {
+        let mut count = 0i64;
+        // SAFETY: asked its length first, then into a buffer that long.
+        check(unsafe {
+            sys::plotcore_get_selection(self.raw(), line, std::ptr::null_mut(), 0, &mut count)
+        })?;
+        let mut out = vec![0i64; count.max(0) as usize];
+        check(unsafe {
+            sys::plotcore_get_selection(
+                self.raw(),
+                line,
+                out.as_mut_ptr(),
+                out.len() as i64,
+                std::ptr::null_mut(),
+            )
+        })?;
+        Ok(out)
+    }
+
+    pub fn set_selection(&mut self, line: i32, elements: &[i64]) -> Result<()> {
+        // SAFETY: `elements` is as long as the count, copied in the call.
+        check(unsafe {
+            sys::plotcore_set_selection(self.raw(), line, elements.as_ptr(), elements.len() as i64)
+        })
+    }
+
+    pub fn clear_selection(&mut self) -> Result<()> {
+        // SAFETY: a call on the figure.
+        check(unsafe { sys::plotcore_clear_selection(self.raw()) })
+    }
+
+    /// Counts every change of any selection: compare it to know whether to ask
+    /// again.
+    pub fn selection_version(&self) -> u64 {
+        // SAFETY: a read of the figure.
+        unsafe { sys::plotcore_selection_version(self.raw()) }
     }
 
     pub fn remove_line(&mut self, line: i32) -> Result<()> {
@@ -1402,6 +1656,48 @@ mod tests {
         figure.press(x, y, Button::Left, Modifiers::CONTROL).unwrap();
         figure.release(x, y, Button::Left, Modifiers::CONTROL).unwrap();
         assert_eq!(figure.line_number(1, "scale").unwrap(), 1.0);
+    }
+
+    #[test]
+    fn a_scatter_is_drawn_as_dots_that_say_which_point_each_is() {
+        let n = 1000;
+        let x: Vec<f64> = (0..n).map(|i| (i % 40) as f64).collect();
+        let y: Vec<f64> = (0..n).map(|i| (i / 40) as f64).collect();
+        let mut figure = Figure::new();
+        figure.set_size(800.0, 500.0, 1.0).unwrap();
+        assert_eq!(figure.add_points(&x, &y, "grid").unwrap(), 0);
+        assert_eq!(figure.line_kind(0), LineKind::Points);
+        assert!(figure.add_points(&x, &y[..10], "short").is_err());
+        figure.set_text("pointDrawing", "markers").unwrap();
+        let values: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        figure.set_point_values(0, Some(&values)).unwrap();
+        let scene = figure.scene().unwrap();
+        let dots = &scene.lines[0];
+        assert_eq!(dots.kind, LineKind::Points);
+        assert_eq!(dots.markers.len(), n);
+        assert_eq!(dots.marker_colours.len(), n);
+        assert!(dots.runs.is_empty() && dots.image.is_none());
+        let axis = scene.colour_axis.expect("a bar for the values");
+        assert_eq!((axis.low, axis.high), (0.0, (n - 1) as f64));
+        // The point under a dot, and a click that selects it.
+        let [px, py] = dots.markers[123];
+        let picked = figure.point_at(px, py, 12.0, true).expect("a point under the dot");
+        assert_eq!(picked.element, dots.marker_elements[123]);
+        let version = figure.selection_version();
+        figure.press(px, py, Button::Left, Modifiers::NONE).unwrap();
+        figure.release(px, py, Button::Left, Modifiers::NONE).unwrap();
+        assert_eq!(figure.selection(0).unwrap(), vec![picked.element]);
+        assert!(figure.selection_version() > version);
+        figure.set_selection(0, &[5, 4]).unwrap();
+        assert_eq!(figure.selection(0).unwrap(), vec![4, 5]);
+        figure.clear_selection().unwrap();
+        assert!(figure.selection(0).unwrap().is_empty());
+        // As an image, the points are pixels; a host without images gets dots.
+        figure.set_text("pointDrawing", "image").unwrap();
+        let image = figure.scene().unwrap().lines[0].image.clone().expect("an image");
+        assert_eq!(image.rgba.len(), image.width * image.height * 4);
+        let request = SceneRequest { forms: FORM_ALL & !FORM_IMAGE, ..SceneRequest::default() };
+        assert_eq!(figure.scene_for(&request).unwrap().lines[0].markers.len(), n);
     }
 
     #[test]

@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 import plotcore
-from plotcore import Button, Figure, Layer, MarkKind, Modifiers
+from plotcore import Button, Figure, Layer, LineKind, MarkKind, Modifiers
 
 GOLDEN = Path(__file__).resolve().parents[2] / "golden"
 
@@ -43,6 +43,18 @@ def generate(words: List[str]) -> Tuple[np.ndarray, int]:
     if kind == "holes":
         every = int(words[2])
         return np.where(np.arange(n) % every < 3, np.nan, i), 3
+    if kind == "cloud":
+        # The x of every point and then its y: each the mean of two draws of
+        # the walk's stream.
+        state = int(words[2]) & 0xFFFFFFFF
+        out = np.empty(2 * n)
+        for k in range(2 * n):
+            state = (state * 1103515245 + 12345) & 0xFFFFFFFF
+            a = ((state >> 16) & 0x7FFF) / 32767.0
+            state = (state * 1103515245 + 12345) & 0xFFFFFFFF
+            b = ((state >> 16) & 0x7FFF) / 32767.0
+            out[k] = (a + b) / 2.0
+        return out, 3
     if kind == "walk":
         state = int(words[2]) & 0xFFFFFFFF
         at = 0.0
@@ -97,7 +109,8 @@ def _marks(out: List[str], what: str, marks) -> None:
         if m.kind == MarkKind.BOX:
             out.append(f"{what} box {int(m.layer)} {int(m.clipped)} {int(m.dashed)}"
                        f" {_g(m.x0)} {_g(m.y0)} {_g(m.x1)} {_g(m.y1)}" + _colour(m.fill)
-                       + _colour(m.stroke) + f" {_g(m.width)} {_g(m.radius)}")
+                       + _colour(m.stroke) + f" {_g(m.width)} {_g(m.radius)}"
+                       + (_colour(m.fill_to) if m.fill_to[3] > 0 else ""))
         elif m.kind == MarkKind.CIRCLE:
             out.append(f"{what} circle {int(m.layer)} {int(m.clipped)} {_g(m.x0)} {_g(m.y0)}"
                        f" {_g(m.radius)}" + _colour(m.fill) + _colour(m.stroke)
@@ -108,7 +121,7 @@ def _marks(out: List[str], what: str, marks) -> None:
                        + f" |{m.text}")
 
 
-def digest(scene: plotcore.Scene, index: int) -> List[str]:
+def digest(figure: Figure, scene: plotcore.Scene, index: int) -> List[str]:
     out = [f"scene {index}", f"size {_g(scene.width)} {_g(scene.height)}"]
     a = scene.area
     out.append(f"area {_g(a.x)} {_g(a.y)} {_g(a.width)} {_g(a.height)}")
@@ -136,6 +149,27 @@ def digest(scene: plotcore.Scene, index: int) -> List[str]:
             bx, by = line.bars.sum(axis=0).tolist()
             bu, bv = line.bar_values.sum(axis=0).tolist()
             out.append(f"bars {len(line.bars) // 2} {_g(bx)} {_g(by)} {_g(bu)} {_g(bv)}")
+        if line.kind == LineKind.POINTS:
+            mx = my = me = ux = uy = 0.0
+            rgba = [0.0, 0.0, 0.0, 0.0]
+            for k in range(len(line.markers)):
+                mx += float(line.markers[k][0])
+                my += float(line.markers[k][1])
+                me += float(line.marker_elements[k])
+                if len(line.marker_colours):
+                    for c in range(4):
+                        rgba[c] += float(line.marker_colours[k][c])
+                if len(line.marker_values):
+                    ux += float(line.marker_values[k][0])
+                    uy += float(line.marker_values[k][1])
+            out.append(f"points {len(line.markers)} {_g(line.marker_radius)} {_g(mx)} {_g(my)}"
+                       f" {_g(me)} " + " ".join(_g(c) for c in rgba) + f" {_g(ux)} {_g(uy)}")
+            if line.image is not None:
+                height, width = line.image.pixels.shape[:2]
+                covered = int((line.image.pixels[:, :, 3] >= 128).sum())
+                r = line.image.rect
+                out.append(f"image {width} {height} {_g(r.x)} {_g(r.y)} {_g(r.width)}"
+                           f" {_g(r.height)} {covered}")
     for what, marks in (("under", scene.under), ("over", scene.over)):
         _marks(out, what, marks)
     for e in scene.legend:
@@ -147,9 +181,19 @@ def digest(scene: plotcore.Scene, index: int) -> List[str]:
     r = scene.reading
     out.append(f"reading {int(r.valid)} {r.line} {_g(r.x)} {_g(r.y)} {_g(r.px)} {_g(r.py)}"
                f" |{r.x_text}|{r.y_text}")
+    if r.valid and (r.element >= 0 or r.value_text):
+        out.append(f"reading_element {r.element} |{r.value_text}")
+    axis = scene.colour_axis
+    if axis is not None:
+        out.append(f"colour_axis {_g(axis.low)} {_g(axis.high)} {int(axis.log)} {_g(axis.bar.x)}"
+                   f" {_g(axis.bar.y)} {_g(axis.bar.width)} {_g(axis.bar.height)}")
     b = scene.band
     out.append("band 0 0 0 0 0" if b is None else
                f"band 1 {_g(b.x)} {_g(b.y)} {_g(b.width)} {_g(b.height)}")
+    for line in range(len(figure)):
+        chosen = figure.selection(line) if figure.line(line).kind == LineKind.POINTS else []
+        if len(chosen):
+            out.append(f"selection {line} {len(chosen)} {int(np.sum(chosen))}")
     return out
 
 
@@ -165,6 +209,13 @@ def run(script: Path) -> List[str]:
     kept: Optional[str] = None
     pointer = [0.0, 0.0]
     scenes = 0
+
+    def marker(line: int, index: int) -> Tuple[float, float]:
+        for drawn in last.lines if last else []:
+            if drawn.line == line and index < len(drawn.markers):
+                x, y = drawn.markers[index]
+                return float(x), float(y)
+        raise IndexError(f"no marker {index} of scatter {line}")
 
     def sample(line: int, index: int) -> Tuple[float, float]:
         for drawn in last.lines if last else []:
@@ -184,6 +235,35 @@ def run(script: Path) -> List[str]:
         elif command == "line":
             values, used = generate(w[1:])
             figure.add_line(values, _rest(line, 1 + used))
+        elif command == "points":
+            xy, used = generate(w[1:])
+            half = len(xy) // 2
+            figure.add_points(xy[:half], xy[half:], _rest(line, 1 + used))
+        elif command == "point_values":
+            figure.set_point_values(int(w[1]), generate(w[2:])[0])
+        elif command == "point_colours":
+            target = int(w[1])
+            n = figure.line(target).length
+            state = int(w[2]) & 0xFFFFFFFF
+            rgba = np.empty(4 * n, dtype=np.uint8)
+            for k in range(4 * n):
+                state = (state * 1103515245 + 12345) & 0xFFFFFFFF
+                rgba[k] = 255 if k % 4 == 3 else (state >> 16) & 0xFF
+            figure.set_point_colours(target, rgba.reshape(n, 4))
+        elif command == "select":
+            figure.set_selection(int(w[1]), [int(v) for v in w[2:]])
+        elif command == "clear_selection":
+            figure.clear_selection()
+        elif command == "click_point":
+            pointer = list(marker(int(w[1]), int(w[2])))
+            figure.press(pointer[0], pointer[1], Button.LEFT, _modifiers(w[3]))
+            figure.release(pointer[0], pointer[1], Button.LEFT, _modifiers(w[3]))
+        elif command == "pick":
+            found = figure.point_at(float(w[1]), float(w[2]), 12.0)
+            if found is None:
+                out.append("pick 0 -1 -1 0 0")
+            else:
+                out.append(f"pick 1 {found[0]} {found[1]} {_g(found[2])} {_g(found[3])}")
         elif command == "remove":
             figure.remove_line(int(w[1]))
         elif command == "clear":
@@ -254,7 +334,7 @@ def run(script: Path) -> List[str]:
             figure.restore(kept or "")
         elif command == "scene":
             last = figure.scene()
-            out.extend(digest(last, scenes))
+            out.extend(digest(figure, last, scenes))
             scenes += 1
         else:
             raise ValueError(f"no command {command}")

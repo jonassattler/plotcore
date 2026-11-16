@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use plotcore::{Button, Figure, Layer, Mark, MarkKind, Modifiers, Rgba, Scene};
+use plotcore::{Button, Figure, Layer, LineKind, Mark, MarkKind, Modifiers, Rgba, Scene};
 
 fn golden() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../golden")
@@ -52,6 +52,23 @@ fn generate(words: &[&str]) -> (Vec<f64>, usize) {
         "holes" => {
             let every: usize = words[2].parse().unwrap();
             ((0..n).map(|i| if i % every < 3 { f64::NAN } else { i as f64 }).collect(), 3)
+        }
+        "cloud" => {
+            // The x of every point and then its y: each the mean of two draws
+            // of the walk's stream.
+            let mut state: u32 = words[2].parse().unwrap();
+            let mut draw = || {
+                state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                f64::from((state >> 16) & 0x7fff) / 32767.0
+            };
+            let values = (0..2 * n)
+                .map(|_| {
+                    let a = draw();
+                    let b = draw();
+                    (a + b) / 2.0
+                })
+                .collect();
+            (values, 3)
         }
         "walk" => {
             let mut state: u32 = words[2].parse().unwrap();
@@ -134,7 +151,7 @@ fn marks(out: &mut Vec<String>, what: &str, marks: &[Mark]) {
     for m in marks {
         match m.kind {
             MarkKind::Box => out.push(format!(
-                "{what} box {} {} {} {} {} {} {}{}{} {} {}",
+                "{what} box {} {} {} {} {} {} {}{}{} {} {}{}",
                 layer_number(m.layer),
                 m.clipped as i32,
                 m.dashed as i32,
@@ -145,7 +162,8 @@ fn marks(out: &mut Vec<String>, what: &str, marks: &[Mark]) {
                 colour(&m.fill),
                 colour(&m.stroke),
                 g(m.width),
-                g(m.radius)
+                g(m.radius),
+                if m.fill_to.alpha > 0.0 { colour(&m.fill_to) } else { String::new() }
             )),
             MarkKind::Circle => out.push(format!(
                 "{what} circle {} {} {} {} {}{}{} {}",
@@ -183,7 +201,7 @@ fn layer_number(layer: Layer) -> i32 {
     }
 }
 
-fn digest(scene: &Scene, index: usize, out: &mut Vec<String>) {
+fn digest(figure: &Figure, scene: &Scene, index: usize, out: &mut Vec<String>) {
     out.push(format!("scene {index}"));
     out.push(format!("size {} {}", g(scene.width), g(scene.height)));
     let a = &scene.area;
@@ -240,6 +258,52 @@ fn digest(scene: &Scene, index: usize, out: &mut Vec<String>) {
                 g(sum(&line.bar_values, 1))
             ));
         }
+        if line.kind == LineKind::Points {
+            let (mut mx, mut my, mut me, mut ux, mut uy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            let mut rgba = [0.0f64; 4];
+            for k in 0..line.markers.len() {
+                mx += line.markers[k][0];
+                my += line.markers[k][1];
+                me += line.marker_elements[k] as f64;
+                if let Some(c) = line.marker_colours.get(k) {
+                    rgba[0] += c.red;
+                    rgba[1] += c.green;
+                    rgba[2] += c.blue;
+                    rgba[3] += c.alpha;
+                }
+                if let Some(v) = line.marker_values.get(k) {
+                    ux += v[0];
+                    uy += v[1];
+                }
+            }
+            out.push(format!(
+                "points {} {} {} {} {} {} {} {} {} {} {}",
+                line.markers.len(),
+                g(line.marker_radius),
+                g(mx),
+                g(my),
+                g(me),
+                g(rgba[0]),
+                g(rgba[1]),
+                g(rgba[2]),
+                g(rgba[3]),
+                g(ux),
+                g(uy)
+            ));
+            if let Some(image) = &line.image {
+                let covered = image.rgba.chunks_exact(4).filter(|p| p[3] >= 128).count();
+                let r = &image.rect;
+                out.push(format!(
+                    "image {} {} {} {} {} {} {covered}",
+                    image.width,
+                    image.height,
+                    g(r.x),
+                    g(r.y),
+                    g(r.width),
+                    g(r.height)
+                ));
+            }
+        }
     }
     marks(out, "under", &scene.under);
     marks(out, "over", &scene.over);
@@ -275,9 +339,35 @@ fn digest(scene: &Scene, index: usize, out: &mut Vec<String>) {
         )),
         None => out.push("reading 0 -1 0 0 0 0 ||".to_owned()),
     }
+    if let Some(r) = &scene.reading {
+        if r.element >= 0 || !r.value_text.is_empty() {
+            out.push(format!("reading_element {} |{}", r.element, r.value_text));
+        }
+    }
+    if let Some(axis) = &scene.colour_axis {
+        out.push(format!(
+            "colour_axis {} {} {} {} {} {} {}",
+            g(axis.low),
+            g(axis.high),
+            axis.log as i32,
+            g(axis.bar.x),
+            g(axis.bar.y),
+            g(axis.bar.width),
+            g(axis.bar.height)
+        ));
+    }
     match &scene.band {
         Some(b) => out.push(format!("band 1 {} {} {} {}", g(b.x), g(b.y), g(b.width), g(b.height))),
         None => out.push("band 0 0 0 0 0".to_owned()),
+    }
+    for line in 0..figure.line_count() {
+        if figure.line_kind(line) != LineKind::Points {
+            continue;
+        }
+        let chosen = figure.selection(line).unwrap();
+        if !chosen.is_empty() {
+            out.push(format!("selection {line} {} {}", chosen.len(), chosen.iter().sum::<i64>()));
+        }
     }
 }
 
@@ -321,8 +411,52 @@ fn run(script: &str) -> Vec<String> {
                 .copied()
                 .unwrap_or_else(|| panic!("no sample {at} of line {line}"))
         };
+        let marker = |last: &Option<Scene>, line: i32, at: usize| -> [f64; 2] {
+            last.as_ref()
+                .and_then(|s| s.lines.iter().find(|d| d.line == line))
+                .and_then(|d| d.markers.get(at))
+                .copied()
+                .unwrap_or_else(|| panic!("no marker {at} of scatter {line}"))
+        };
         let result = match w[0] {
             "size" => figure.set_size(number(w[1]), number(w[2]), number(w[3])),
+            "points" => {
+                let (xy, used) = generate(&w[1..]);
+                let half = xy.len() / 2;
+                figure.add_points(&xy[..half], &xy[half..], rest(line, 1 + used)).map(|_| ())
+            }
+            "point_values" => figure.set_point_values(index(w[1]), Some(&generate(&w[2..]).0)),
+            "point_colours" => {
+                let target = index(w[1]);
+                let n = figure.line_length(target).max(0) as usize;
+                let mut state: u32 = w[2].parse().unwrap();
+                let mut colours = vec![[0u8; 4]; n];
+                for (k, byte) in colours.iter_mut().flatten().enumerate() {
+                    state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    *byte = if k % 4 == 3 { 255 } else { ((state >> 16) & 0xff) as u8 };
+                }
+                figure.set_point_colours(target, Some(&colours))
+            }
+            "select" => {
+                let chosen: Vec<i64> = w[2..].iter().map(|v| v.parse().unwrap()).collect();
+                figure.set_selection(index(w[1]), &chosen)
+            }
+            "clear_selection" => figure.clear_selection(),
+            "click_point" => {
+                pointer = marker(&last, index(w[1]), w[2].parse().unwrap());
+                figure.press(pointer[0], pointer[1], Button::Left, modifiers(w[3])).and_then(|()| {
+                    figure.release(pointer[0], pointer[1], Button::Left, modifiers(w[3]))
+                })
+            }
+            "pick" => {
+                match figure.point_at(number(w[1]), number(w[2]), 12.0, false) {
+                    Some(p) => {
+                        out.push(format!("pick 1 {} {} {} {}", p.line, p.element, g(p.x), g(p.y)))
+                    }
+                    None => out.push("pick 0 -1 -1 0 0".to_owned()),
+                }
+                Ok(())
+            }
             "line" => {
                 let (values, used) = generate(&w[1..]);
                 figure.add_line(&values, rest(line, 1 + used)).map(|_| ())
@@ -399,7 +533,7 @@ fn run(script: &str) -> Vec<String> {
             "restore" => figure.restore(kept.as_deref().unwrap_or("")),
             "scene" => {
                 let scene = figure.scene().unwrap();
-                digest(&scene, scenes, &mut out);
+                digest(&figure, &scene, scenes, &mut out);
                 scenes += 1;
                 last = Some(scene);
                 Ok(())

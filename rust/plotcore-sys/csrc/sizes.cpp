@@ -27,6 +27,8 @@ extern "C" std::size_t plotcore_sys_size_of(int which)
         return sizeof(plotcore_legend_entry);
     case 7:
         return sizeof(plotcore_reading);
+    case 8:
+        return sizeof(plotcore_picked);
     default:
         return 0;
     }

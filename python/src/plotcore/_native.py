@@ -24,11 +24,13 @@ from ctypes import (
     c_int,
     c_int32,
     c_int64,
+    c_uint8,
+    c_uint64,
     c_void_p,
 )
 from pathlib import Path
 
-ABI_VERSION = 2
+ABI_VERSION = 3
 
 
 class Rgba(Structure):
@@ -64,6 +66,11 @@ class LineInfo(Structure):
         ("y_log", c_int32),
         ("own", c_int32),
         ("numbered", c_int32),
+        ("kind", c_int32),
+        ("coloured", c_int32),
+        ("image_width", c_int64),
+        ("image_height", c_int64),
+        ("image_rect", Rect),
     ]
 
 
@@ -90,6 +97,7 @@ class Mark(Structure):
         ("text", c_char_p),
         ("base", c_char_p),
         ("exponent", c_char_p),
+        ("fill_to", Rgba),
     ]
 
 
@@ -120,6 +128,7 @@ class LegendEntry(Structure):
         ("text_x", c_double),
         ("text_y", c_double),
         ("name", c_char_p),
+        ("kind", c_int32),
     ]
 
 
@@ -133,7 +142,14 @@ class Reading(Structure):
         ("py", c_double),
         ("x_text", c_char_p),
         ("y_text", c_char_p),
+        ("element", c_int64),
+        ("value", c_double),
+        ("value_text", c_char_p),
     ]
+
+
+class Picked(Structure):
+    _fields_ = [("line", c_int32), ("element", c_int64), ("x", c_double), ("y", c_double)]
 
 
 READER = CFUNCTYPE(c_int, c_void_p, c_int64, c_int64, POINTER(c_double))
@@ -145,6 +161,8 @@ _status = c_int
 _figure = c_void_p
 _scene = c_void_p
 _doubles = POINTER(c_double)
+_bytes = POINTER(c_uint8)
+_longs = POINTER(c_int64)
 
 # name: (result, arguments)
 _DECLARATIONS = {
@@ -173,6 +191,24 @@ _DECLARATIONS = {
     "plotcore_get_line_name": (_status, [_figure, c_int32, c_char_p, c_int64, POINTER(c_int64)]),
     "plotcore_line_ready": (c_int32, [_figure, c_int32]),
     "plotcore_line_has_time": (c_int32, [_figure, c_int32]),
+    "plotcore_line_kind": (c_int32, [_figure, c_int32]),
+    "plotcore_add_points": (
+        _status,
+        [_figure, _doubles, _doubles, c_int64, c_char_p, POINTER(c_int32)],
+    ),
+    "plotcore_begin_points": (_status, [_figure, c_int64, c_char_p, POINTER(c_int32)]),
+    "plotcore_append_points": (_status, [_figure, c_int32, _doubles, _doubles, c_int64]),
+    "plotcore_set_point_values": (_status, [_figure, c_int32, _doubles, c_int64]),
+    "plotcore_set_point_colours": (_status, [_figure, c_int32, _bytes, c_int64]),
+    "plotcore_point_at": (
+        c_int32,
+        [_figure, c_double, c_double, c_double, c_int32, POINTER(Picked)],
+    ),
+    "plotcore_selection_count": (c_int64, [_figure, c_int32]),
+    "plotcore_get_selection": (_status, [_figure, c_int32, _longs, c_int64, POINTER(c_int64)]),
+    "plotcore_set_selection": (_status, [_figure, c_int32, _longs, c_int64]),
+    "plotcore_clear_selection": (_status, [_figure]),
+    "plotcore_selection_version": (c_uint64, [_figure]),
     "plotcore_set_index_axis": (_status, [_figure, c_double, c_double]),
     "plotcore_set_time": (_status, [_figure, _doubles, c_int64]),
     "plotcore_set_line_time": (_status, [_figure, c_int32, _doubles, c_int64]),
@@ -238,6 +274,10 @@ _DECLARATIONS = {
     "plotcore_scene_line_bar_count": (c_int64, [_scene, c_int64]),
     "plotcore_scene_line_bars": (_doubles, [_scene, c_int64]),
     "plotcore_scene_line_bar_values": (_doubles, [_scene, c_int64]),
+    "plotcore_scene_line_marker_colours": (_doubles, [_scene, c_int64]),
+    "plotcore_scene_line_marker_elements": (_longs, [_scene, c_int64]),
+    "plotcore_scene_line_marker_values": (_doubles, [_scene, c_int64]),
+    "plotcore_scene_line_image": (_bytes, [_scene, c_int64]),
     "plotcore_scene_under_count": (c_int64, [_scene]),
     "plotcore_scene_under": (_status, [_scene, c_int64, POINTER(Mark)]),
     "plotcore_scene_over_count": (c_int64, [_scene]),
@@ -247,6 +287,10 @@ _DECLARATIONS = {
     "plotcore_scene_legend_rect": (Rect, [_scene]),
     "plotcore_scene_reading": (Reading, [_scene]),
     "plotcore_scene_band": (c_int32, [_scene, POINTER(Rect)]),
+    "plotcore_scene_colour_axis": (
+        c_int32,
+        [_scene, _doubles, _doubles, POINTER(c_int32), POINTER(Rect)],
+    ),
 }
 
 

@@ -287,6 +287,129 @@ static void contract(void)
 
     plotcore_figure_free(figure);
 
+    /* A scatter: points in, values and colours on them, markers or an image
+     * out, a point picked and selected. */
+    figure = plotcore_figure_new();
+    CHECK(plotcore_set_size(figure, 640, 400, 1) == PLOTCORE_OK);
+    double xs[500];
+    double ys[500];
+    double vs[500];
+    uint8_t rgba[4 * 500];
+    for (int i = 0; i < 500; ++i) {
+        xs[i] = (double)(i % 25);
+        ys[i] = (double)(i / 25);
+        vs[i] = (double)i;
+        rgba[4 * i] = (uint8_t)i;
+        rgba[4 * i + 1] = 0;
+        rgba[4 * i + 2] = 200;
+        rgba[4 * i + 3] = 255;
+    }
+    int32_t points = -1;
+    CHECK(plotcore_add_points(figure, xs, ys, 500, "grid", &points) == PLOTCORE_OK && points == 0);
+    CHECK(plotcore_line_kind(figure, 0) == PLOTCORE_POINTS);
+    CHECK(plotcore_line_kind(figure, 3) == -1);
+    CHECK(plotcore_line_length(figure, 0) == 500);
+    CHECK(plotcore_add_points(figure, NULL, ys, 5, NULL, NULL) == PLOTCORE_ERROR_ARGUMENT);
+    CHECK(plotcore_append_line(figure, 0, vs, 1) == PLOTCORE_ERROR_STATE);
+    CHECK(plotcore_set_line_time(figure, 0, vs, 500) == PLOTCORE_ERROR_STATE);
+    released = 0;
+    CHECK(plotcore_set_line_reader(figure, 0, readRamp, NULL, releaseContext) ==
+          PLOTCORE_ERROR_STATE);
+    CHECK(released == 1); /* refused, and let go of all the same */
+    CHECK(plotcore_set_point_values(figure, 0, vs, 499) == PLOTCORE_ERROR_ARGUMENT);
+    CHECK(plotcore_set_point_values(figure, 0, vs, 500) == PLOTCORE_OK);
+    CHECK(plotcore_set_text(figure, "pointDrawing", "markers") == PLOTCORE_OK);
+    CHECK(plotcore_set_text(figure, "pointDrawing", "plaid") == PLOTCORE_ERROR_ARGUMENT);
+    CHECK(plotcore_set_text(figure, "colourMap", "inferno") == PLOTCORE_OK);
+    CHECK(plotcore_set_text(figure, "colourMap", "okabe-ito") == PLOTCORE_ERROR_ARGUMENT);
+    CHECK(plotcore_set_number(figure, "colourLogBase", 0.5) == PLOTCORE_ERROR_ARGUMENT);
+    CHECK(plotcore_set_text(figure, "colourLabel", "rank") == PLOTCORE_OK);
+    char pointDrawing[16];
+    CHECK(plotcore_get_text(figure, "pointDrawing", pointDrawing, 16, NULL) == PLOTCORE_OK);
+    CHECK(strcmp(pointDrawing, "markers") == 0);
+    scene = plotcore_scene_new(figure);
+    CHECK(scene != NULL && plotcore_scene_line(scene, 0, &info) == PLOTCORE_OK);
+    CHECK(info.kind == PLOTCORE_POINTS && info.coloured == 1 && info.image_width == 0);
+    CHECK(info.marker_count == 500 && info.run_count == 0);
+    const double* centres = plotcore_scene_line_markers(scene, 0);
+    const double* colours = plotcore_scene_line_marker_colours(scene, 0);
+    const int64_t* elements = plotcore_scene_line_marker_elements(scene, 0);
+    const double* where = plotcore_scene_line_marker_values(scene, 0);
+    CHECK(centres != NULL && colours != NULL && elements != NULL && where != NULL);
+    CHECK(where[2 * 7] == xs[elements[7]] && where[2 * 7 + 1] == ys[elements[7]]);
+    double barLow = 0;
+    double barHigh = 0;
+    int32_t barLog = -1;
+    plotcore_rect bar = {0, 0, 0, 0};
+    CHECK(plotcore_scene_colour_axis(scene, &barLow, &barHigh, &barLog, &bar) == 1);
+    CHECK(barLow == 0.0 && barHigh == 499.0 && barLog == 0 && bar.width > 0);
+    const plotcore_rect paneArea = plotcore_scene_area(scene);
+    CHECK(bar.x > paneArea.x + paneArea.width);
+    int64_t ramps = 0;
+    for (int64_t i = 0; i < plotcore_scene_over_count(scene); ++i) {
+        plotcore_scene_over(scene, i, &mark);
+        ramps += mark.kind == PLOTCORE_MARK_BOX && mark.fill_to.alpha > 0 ? 1 : 0;
+    }
+    CHECK(ramps > 0);
+    /* The point under a marker, and a click that selects it. */
+    const double cx = centres[2 * 40];
+    const double cy = centres[2 * 40 + 1];
+    plotcore_scene_free(scene);
+    plotcore_picked picked;
+    CHECK(plotcore_point_at(figure, cx, cy, 12.0, 1, &picked) == 1);
+    CHECK(picked.line == 0 && picked.element == elements[40] && picked.x == xs[elements[40]]);
+    CHECK(plotcore_press(figure, cx, cy, PLOTCORE_BUTTON_LEFT, 0) == PLOTCORE_OK);
+    CHECK(plotcore_release(figure, cx, cy, PLOTCORE_BUTTON_LEFT, 0) == PLOTCORE_OK);
+    CHECK(plotcore_selection_count(figure, 0) == 1);
+    int64_t chosen[4] = {0, 0, 0, 0};
+    int64_t many = 0;
+    CHECK(plotcore_get_selection(figure, 0, chosen, 4, &many) == PLOTCORE_OK);
+    CHECK(many == 1 && chosen[0] == picked.element);
+    const uint64_t version = plotcore_selection_version(figure);
+    const int64_t three[3] = {1, 2, 3};
+    CHECK(plotcore_set_selection(figure, 0, three, 3) == PLOTCORE_OK);
+    CHECK(plotcore_selection_count(figure, 0) == 3 && plotcore_selection_version(figure) > version);
+    CHECK(plotcore_clear_selection(figure) == PLOTCORE_OK &&
+          plotcore_selection_count(figure, 0) == 0);
+    /* The crosshair reads a point's element and its value. */
+    CHECK(plotcore_hover(figure, cx, cy) == PLOTCORE_OK);
+    scene = plotcore_scene_new(figure);
+    const plotcore_reading read = plotcore_scene_reading(scene);
+    CHECK(read.valid == 1 && read.element == picked.element && read.value == vs[read.element]);
+    CHECK(read.value_text != NULL && strlen(read.value_text) > 0);
+    plotcore_scene_free(scene);
+    /* Colours of their own beat the values, and draw no bar; as an image, the
+     * points are pixels. */
+    CHECK(plotcore_set_point_colours(figure, 0, rgba, 500) == PLOTCORE_OK);
+    CHECK(plotcore_set_text(figure, "pointDrawing", "image") == PLOTCORE_OK);
+    scene = plotcore_scene_new(figure);
+    CHECK(plotcore_scene_colour_axis(scene, NULL, NULL, NULL, NULL) == 0);
+    CHECK(plotcore_scene_line(scene, 0, &info) == PLOTCORE_OK);
+    CHECK(info.image_width > 0 && info.image_height > 0 && info.marker_count == 0);
+    const uint8_t* image = plotcore_scene_line_image(scene, 0);
+    CHECK(image != NULL);
+    int64_t inked = 0;
+    for (int64_t p = 0; image != NULL && p < info.image_width * info.image_height; ++p) {
+        inked += image[4 * p + 3] > 0 ? 1 : 0;
+    }
+    CHECK(inked > 500);
+    plotcore_scene_free(scene);
+    /* A host that paints no images is handed markers. */
+    plotcore_scene_request markersOnly = {
+        PLOTCORE_FORM_ALL & ~PLOTCORE_FORM_IMAGE, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0};
+    scene = plotcore_scene_request_new(figure, &markersOnly);
+    CHECK(plotcore_scene_line(scene, 0, &info) == PLOTCORE_OK && info.marker_count == 500);
+    plotcore_scene_free(scene);
+    /* Points in pieces are the points whole. */
+    int32_t streamed = -1;
+    CHECK(plotcore_begin_points(figure, 500, "pieces", &streamed) == PLOTCORE_OK && streamed == 1);
+    CHECK(plotcore_append_points(figure, 1, xs, ys, 250) == PLOTCORE_OK);
+    CHECK(plotcore_append_points(figure, 1, xs + 250, ys + 250, 250) == PLOTCORE_OK);
+    CHECK(plotcore_finish_line(figure, 1) == PLOTCORE_OK);
+    CHECK(plotcore_append_points(figure, 1, xs, ys, 1) == PLOTCORE_ERROR_STATE);
+    CHECK(plotcore_line_ready(figure, 1) == 1 && plotcore_line_length(figure, 1) == 500);
+    plotcore_figure_free(figure);
+
     /* ...and when the figure goes. */
     figure = plotcore_figure_new();
     double one = 1.0;
@@ -373,7 +496,11 @@ static void marks(Out* out, const char* what, plotcore_scene* scene, int64_t cou
                 m.x0, m.y0, m.x1, m.y1);
             colour(out, m.fill);
             colour(out, m.stroke);
-            put(out, " " G " " G "\n", m.width, m.radius);
+            put(out, " " G " " G, m.width, m.radius);
+            if (m.fill_to.alpha > 0) {
+                colour(out, m.fill_to);
+            }
+            put(out, "\n");
             break;
         case PLOTCORE_MARK_CIRCLE:
             put(out, "%s circle %d %d " G " " G " " G, what, m.layer, m.clipped, m.x0, m.y0,
@@ -394,7 +521,7 @@ static void marks(Out* out, const char* what, plotcore_scene* scene, int64_t cou
     }
 }
 
-static void digest(Out* out, plotcore_scene* scene, int index)
+static void digest(Out* out, plotcore_figure* figure, plotcore_scene* scene, int index)
 {
     double w = 0;
     double h = 0;
@@ -458,6 +585,43 @@ static void digest(Out* out, plotcore_scene* scene, int index)
             }
             put(out, "bars %lld " G " " G " " G " " G "\n", (long long)bars, bx, by, bu, bv);
         }
+        if (info.kind == PLOTCORE_POINTS) {
+            const double* centres = plotcore_scene_line_markers(scene, i);
+            const double* colours = plotcore_scene_line_marker_colours(scene, i);
+            const int64_t* elements = plotcore_scene_line_marker_elements(scene, i);
+            const double* values = plotcore_scene_line_marker_values(scene, i);
+            double mx = 0;
+            double my = 0;
+            double me = 0;
+            double rgba[4] = {0, 0, 0, 0};
+            double ux = 0;
+            double uy = 0;
+            for (int64_t k = 0; k < info.marker_count; ++k) {
+                mx += centres[2 * k];
+                my += centres[2 * k + 1];
+                me += (double)elements[k];
+                for (int c = 0; c < 4 && colours != NULL; ++c) {
+                    rgba[c] += colours[4 * k + c];
+                }
+                if (values != NULL) {
+                    ux += values[2 * k];
+                    uy += values[2 * k + 1];
+                }
+            }
+            put(out, "points %lld " G " " G " " G " " G " " G " " G " " G " " G " " G " " G "\n",
+                (long long)info.marker_count, info.marker_radius, mx, my, me, rgba[0], rgba[1],
+                rgba[2], rgba[3], ux, uy);
+            if (info.image_width > 0) {
+                const uint8_t* image = plotcore_scene_line_image(scene, i);
+                long long covered = 0;
+                for (int64_t p = 0; p < info.image_width * info.image_height; ++p) {
+                    covered += image[4 * p + 3] >= 128 ? 1 : 0;
+                }
+                put(out, "image %lld %lld " G " " G " " G " " G " %lld\n",
+                    (long long)info.image_width, (long long)info.image_height, info.image_rect.x,
+                    info.image_rect.y, info.image_rect.width, info.image_rect.height, covered);
+            }
+        }
     }
     marks(out, "under", scene, plotcore_scene_under_count(scene), plotcore_scene_under);
     marks(out, "over", scene, plotcore_scene_over_count(scene), plotcore_scene_over);
@@ -477,9 +641,33 @@ static void digest(Out* out, plotcore_scene* scene, int index)
     const plotcore_reading reading = plotcore_scene_reading(scene);
     put(out, "reading %d %d " G " " G " " G " " G " |%s|%s\n", reading.valid, reading.line,
         reading.x, reading.y, reading.px, reading.py, reading.x_text, reading.y_text);
+    if (reading.valid && (reading.element >= 0 || reading.value_text[0] != '\0')) {
+        put(out, "reading_element %lld |%s\n", (long long)reading.element, reading.value_text);
+    }
+    double barLow = 0;
+    double barHigh = 0;
+    int32_t barLog = 0;
+    plotcore_rect bar = {0, 0, 0, 0};
+    if (plotcore_scene_colour_axis(scene, &barLow, &barHigh, &barLog, &bar)) {
+        put(out, "colour_axis " G " " G " %d " G " " G " " G " " G "\n", barLow, barHigh, barLog,
+            bar.x, bar.y, bar.width, bar.height);
+    }
     plotcore_rect band = {0, 0, 0, 0};
     const int present = plotcore_scene_band(scene, &band);
     put(out, "band %d " G " " G " " G " " G "\n", present, band.x, band.y, band.width, band.height);
+    for (int32_t line = 0; line < plotcore_line_count(figure); ++line) {
+        const int64_t count = plotcore_selection_count(figure, line);
+        if (count > 0) {
+            int64_t* chosen = malloc((size_t)count * sizeof(int64_t));
+            plotcore_get_selection(figure, line, chosen, count, NULL);
+            long long sum = 0;
+            for (int64_t k = 0; k < count; ++k) {
+                sum += (long long)chosen[k];
+            }
+            free(chosen);
+            put(out, "selection %d %lld %lld\n", line, (long long)count, sum);
+        }
+    }
 }
 
 /* The generators of README.md. */
@@ -528,6 +716,21 @@ static double* generate(char** words, int count, int64_t* length, int* used)
         const int64_t every = atoll(words[2]);
         for (int64_t i = 0; i < n; ++i) {
             v[i] = (i % every) < 3 ? NAN : (double)i;
+        }
+        *used = 3;
+    }
+    else if (strcmp(kind, "cloud") == 0 && count >= 3) {
+        /* Twice as many values as asked: the x and then the y of each point,
+         * each the mean of two draws of the walk's stream. */
+        uint32_t state = (uint32_t)strtoul(words[2], NULL, 10);
+        free(v);
+        v = malloc((size_t)(n > 0 ? 2 * n : 1) * sizeof(double));
+        for (int64_t i = 0; i < 2 * n; ++i) {
+            state = state * 1103515245u + 12345u;
+            const double a = (double)((state >> 16) & 0x7fffu) / 32767.0;
+            state = state * 1103515245u + 12345u;
+            const double b = (double)((state >> 16) & 0x7fffu) / 32767.0;
+            v[i] = (a + b) / 2.0;
         }
         *used = 3;
     }
@@ -585,6 +788,23 @@ static const char* rest(const char* line, int skip)
         }
     }
     return at != NULL ? at : "";
+}
+
+/* Where marker `k` of drawn scatter `line` is, in `last`. */
+static int markerAt(plotcore_scene* last, int line, int64_t k, double* x, double* y)
+{
+    for (int64_t i = 0; last != NULL && i < plotcore_scene_line_count(last); ++i) {
+        plotcore_line_info info;
+        plotcore_scene_line(last, i, &info);
+        if (info.line != line || k >= info.marker_count) {
+            continue;
+        }
+        const double* xy = plotcore_scene_line_markers(last, i);
+        *x = xy[2 * k];
+        *y = xy[2 * k + 1];
+        return 1;
+    }
+    return 0;
 }
 
 /* Where sample `sample` of drawn line `line`'s first run is, in `last`. */
@@ -652,6 +872,69 @@ static int runScript(const char* path, Out* out)
                 status = plotcore_add_line(figure, values, n, rest(line, 1 + used), NULL);
                 free(values);
             }
+        }
+        else if (strcmp(command, "points") == 0) {
+            int64_t n = 0;
+            int used = 0;
+            double* xy = generate(words + 1, count - 1, &n, &used);
+            if (xy == NULL || strcmp(words[1], "cloud") != 0) {
+                status = PLOTCORE_ERROR_ARGUMENT;
+            }
+            else {
+                status = plotcore_add_points(figure, xy, xy + n, n, rest(line, 1 + used), NULL);
+            }
+            free(xy);
+        }
+        else if (strcmp(command, "point_values") == 0) {
+            int64_t n = 0;
+            int used = 0;
+            double* values = generate(words + 2, count - 2, &n, &used);
+            status = values == NULL ? PLOTCORE_ERROR_ARGUMENT
+                                    : plotcore_set_point_values(figure, atoi(words[1]), values, n);
+            free(values);
+        }
+        else if (strcmp(command, "point_colours") == 0) {
+            const int32_t target = atoi(words[1]);
+            const int64_t n = plotcore_line_length(figure, target);
+            uint32_t state = (uint32_t)strtoul(words[2], NULL, 10);
+            uint8_t* rgba = malloc((size_t)(n > 0 ? 4 * n : 1));
+            for (int64_t i = 0; i < 4 * n; ++i) {
+                state = state * 1103515245u + 12345u;
+                rgba[i] = (i % 4 == 3) ? 255 : (uint8_t)((state >> 16) & 0xffu);
+            }
+            status = plotcore_set_point_colours(figure, target, rgba, n);
+            free(rgba);
+        }
+        else if (strcmp(command, "select") == 0) {
+            int64_t chosen[60];
+            int k = 0;
+            for (int i = 2; i < count && k < 60; ++i) {
+                chosen[k++] = atoll(words[i]);
+            }
+            status = plotcore_set_selection(figure, atoi(words[1]), chosen, k);
+        }
+        else if (strcmp(command, "clear_selection") == 0) {
+            status = plotcore_clear_selection(figure);
+        }
+        else if (strcmp(command, "click_point") == 0) {
+            if (!markerAt(last, atoi(words[1]), atoll(words[2]), &pointerX, &pointerY)) {
+                status = PLOTCORE_ERROR_RANGE;
+            }
+            else {
+                const int32_t mods = modifiersOf(words[3]);
+                status = plotcore_press(figure, pointerX, pointerY, PLOTCORE_BUTTON_LEFT, mods);
+                if (status == PLOTCORE_OK) {
+                    status =
+                        plotcore_release(figure, pointerX, pointerY, PLOTCORE_BUTTON_LEFT, mods);
+                }
+            }
+        }
+        else if (strcmp(command, "pick") == 0) {
+            plotcore_picked picked = {-1, -1, 0, 0};
+            const int found =
+                plotcore_point_at(figure, atof(words[1]), atof(words[2]), 12.0, 0, &picked);
+            put(out, "pick %d %d %lld " G " " G "\n", found, picked.line, (long long)picked.element,
+                picked.x, picked.y);
         }
         else if (strcmp(command, "remove") == 0) {
             status = plotcore_remove_line(figure, atoi(words[1]));
@@ -798,7 +1081,7 @@ static int runScript(const char* path, Out* out)
                 status = PLOTCORE_ERROR_INTERNAL;
             }
             else {
-                digest(out, last, scenes++);
+                digest(out, figure, last, scenes++);
             }
         }
         else {

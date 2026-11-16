@@ -42,6 +42,12 @@ title, a mode) is the rest of the line.
 | `release_here BUTTON MODS` | release where the pointer is |
 | `wheel_line I S DELTA MODS` | the wheel over sample `S` of line `I` |
 | `click_line I S MODS` | press and release the left button on sample `S` of line `I` |
+| `points cloud N SEED NAME` | add a scatter of `N` points made by `cloud` (below), named `NAME` |
+| `point_values I GEN ARGS...` | scatter `I`'s values, one a point, made by `GEN` |
+| `point_colours I SEED` | scatter `I`'s own colours: the walk's stream a byte at a time for red, green and blue, and 255 for alpha |
+| `select I E...` / `clear_selection` | `set_selection(I, [E...])` / `clear_selection()` |
+| `click_point I K MODS` | press and release the left button on marker `K` of scatter `I`, as the last scene drew it |
+| `pick X Y` | `point_at(X, Y, 12)`, written as `pick FOUND LINE ELEMENT X Y` |
 | `state` | write the state down, and keep it |
 | `restore` | restore the state that was kept |
 | `scene` | digest a scene |
@@ -61,6 +67,12 @@ function, because libm is allowed to differ by an ulp between platforms:
 | `holes N EVERY` | `i`, but NaN wherever `i % EVERY < 3` |
 | `burst N FROM TO` | `i * 0.0001`, but from `FROM` up to `TO`, -100 where `i` is even and 100 where it is odd |
 | `walk N SEED` | a random walk: `state = state * 1103515245 + 12345` modulo 2³², then `at += ((state >> 16) & 0x7fff) / 32767 - 0.5`, plus 500 on every element where `i % 997 == 996` |
+| `cloud N SEED` | `2N` values, the `N` x of a scatter and then its `N` y: each the mean of two draws `((state >> 16) & 0x7fff) / 32767` of the walk's stream, taken in turn |
+
+A scatter's scenes keep to linear axes. Its tree places a point by its
+position, and on a logarithmic axis a position an ulp apart on another
+platform could stand in another cell -- a different point drawn, which no
+tolerance on a sum would pass over.
 
 ## The digest
 
@@ -79,6 +91,8 @@ relative 1e-9, everything after a `|` character for character.
     line INDEX R G B A WIDTH RUNS POINTS TRIANGLE_POINTS MARKERS SUM_X SUM_Y
     window Y_LOW Y_HIGH Y_LOG OWN NUMBERED SUM_VALUE_X SUM_VALUE_Y
     bars COUNT SUM_X SUM_Y SUM_VALUE_X SUM_VALUE_Y
+    points COUNT RADIUS SUM_X SUM_Y SUM_ELEMENTS SUM_R SUM_G SUM_B SUM_A SUM_VALUE_X SUM_VALUE_Y
+    image W H X Y WIDTH HEIGHT COVERED
     WHERE segments LAYER COUNT SUM_X SUM_Y SUM_WIDTH
     WHERE box LAYER CLIPPED DASHED X0 Y0 X1 Y1 FILL_RGBA STROKE_RGBA WIDTH RADIUS
     WHERE circle LAYER CLIPPED X Y RADIUS FILL_RGBA STROKE_RGBA WIDTH
@@ -86,7 +100,10 @@ relative 1e-9, everything after a `|` character for character.
     legend LINE R G B A X0 Y0 X1 Y1 TEXT_X TEXT_Y |NAME
     legend_rect X Y W H
     reading VALID LINE X Y PX PY |X_TEXT|Y_TEXT
+    reading_element ELEMENT |VALUE_TEXT
+    colour_axis LOW HIGH LOG X Y W H
     band PRESENT X Y W H
+    selection LINE COUNT SUM_ELEMENTS
 
 A `state` command writes `state |JSON`.
 
@@ -100,3 +117,15 @@ segment) in order, and `SUM_VALUE_X` and `SUM_VALUE_Y` the same points in the
 data's own units. A `bars` line follows a line's `window` only when any of the
 line is drawn as bars, and adds up both corners of each. A legend appears only
 when it has entries, and its rect only then.
+
+A `points` line follows a scatter's `window`, and adds up its markers'
+centres, elements, colours (zero where they are all the line's) and places in
+the data's own units. An `image` line follows it when the scatter is drawn as
+an image: its size in device pixels, where it is painted, and how many of its
+pixels are at least half covered -- a count and not a sum of bytes, which one
+compiler's rounding could move by one. A box with a ramp in it -- the colour
+bar's -- writes its `FILL_TO_RGBA` after its radius.
+
+`reading_element` follows a reading that names its element or has a value;
+`colour_axis` appears while the colour bar is drawn; and a `selection` line is
+written for every line with something selected, after the band.
