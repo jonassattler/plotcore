@@ -68,3 +68,10 @@ target_include_directories(test_plotviewer PRIVATE ${PROJECT_SOURCE_DIR}/cpp/src
 target_compile_definitions(test_plotviewer PRIVATE
   PLOTCORE_VIEWER_ANSWERS="${CMAKE_CURRENT_SOURCE_DIR}/viewer/answers.jsonl")
 catch_discover_tests(test_plotviewer)
+
+# --- points by an x and a y each ---------------------------------------------
+# The point tree a scatter is drawn through, held to what its header promises
+# by brute force over clouds where each promise matters.
+add_executable(test_plotscatter test_plotscatter.cpp)
+target_link_libraries(test_plotscatter PRIVATE plotcore::core Catch2::Catch2WithMain)
+catch_discover_tests(test_plotscatter)
